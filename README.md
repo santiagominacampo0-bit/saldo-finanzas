@@ -17,7 +17,7 @@ La app usa una clave publicable. Postgres limita el acceso a las filas mediante 
 ## Operación
 
 1. Aplica las migraciones en `supabase/migrations`, en orden, al proyecto de Supabase. Configura en Auth la URL HTTPS del sitio y sus redirecciones.
-2. Para habilitar una cuenta administrativa ya confirmada, el propietario autoriza su UUID en `saldo_private.admins`. El panel requiere TOTP y únicamente devuelve contadores agregados. El primer registro público nunca concede el rol automáticamente.
+2. El proyecto puede reservar el panel para el correo verificado del propietario en `saldo_private.owner_access`. El propietario también puede autorizar un UUID ya confirmado en `saldo_private.admins`. El panel requiere TOTP y únicamente devuelve contadores agregados.
 3. Para push, aplica la migración de Vault, despliega `saldo-notify` con la verificación de usuario y cron que implementa la función, y aplica `supabase/schedule-reminders.sql`. Supabase genera las claves y las conserva cifradas en Vault. La app solicita solo la clave pública al iniciar sesión.
 4. En GitHub, configura Pages con **GitHub Actions**. El flujo publica únicamente los archivos de la aplicación.
 
