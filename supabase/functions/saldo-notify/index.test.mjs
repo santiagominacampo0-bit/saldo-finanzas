@@ -6,25 +6,25 @@ import { beforeEach, test } from "node:test";
 const origin = "https://santiagominacampo0-bit.github.io";
 const session = "header.payload.signature";
 const userId = "10000000-0000-0000-0000-000000000001";
-const fakeCronSecret = "f".repeat(48);
+const fakeCronSecret = "f".repeat(64);
+const vaultPair = { public_key: "B" + "v".repeat(86), private_key: "p".repeat(43) };
+const generatedPair = { publicKey: "B" + "c".repeat(86), privateKey: "k".repeat(43) };
 const env = {
   SUPABASE_URL: "https://example.invalid",
   SUPABASE_SERVICE_ROLE_KEY: "fake-server-key",
-  VAPID_SUBJECT: origin,
-  VAPID_PUBLIC_KEY: "fake-public-key",
-  VAPID_PRIVATE_KEY: "fake-private-key",
-  SALDO_CRON_SECRET: fakeCronSecret,
 };
 
 let handler;
 let scenario;
 globalThis.Deno = { env: { get: (name) => scenario.env[name] }, serve: (fn) => { handler = fn; } };
 globalThis.testPushLibrary = {
-  generateRequestDetails: (_subscription, payload) => ({
-    body: new TextEncoder().encode(payload),
-    headers: { "content-type": "application/octet-stream" },
-  }),
-  setVapidDetails: () => {},
+  generateRequestDetails: (_subscription, payload, options) => {
+    assert.deepEqual(options.vapidDetails, {
+      subject: origin + "/saldo-finanzas/", publicKey: vaultPair.public_key, privateKey: vaultPair.private_key,
+    });
+    return { body: new TextEncoder().encode(payload), headers: { "content-type": "application/octet-stream" } };
+  },
+  generateVAPIDKeys: () => { scenario.keyGenerations++; return generatedPair; },
 };
 globalThis.testSupabase = {
   auth: {
@@ -35,6 +35,12 @@ globalThis.testSupabase = {
   },
   async rpc(name, params) {
     scenario.calls.push({ name, params });
+    if (name === "saldo_get_cron_token") return { data: fakeCronSecret };
+    if (name === "saldo_get_or_initialize_vapid") {
+      if (scenario.vaultError) return { error: { message: "simulated vault failure" } };
+      if (params) scenario.vaultPair = vaultPair;
+      return { data: scenario.vaultPair ? [scenario.vaultPair] : [] };
+    }
     if (name === "saldo_claim_push_quota") return { data: scenario.quota };
     if (name === "saldo_claim_due_push_reminders") return { data: scenario.reminders };
     throw new Error("RPC desconocido " + name);
@@ -70,15 +76,15 @@ globalThis.testSupabase = {
 
 const packageMocks = new Map([
   ["npm:@supabase/supabase-js@2.119.2", "export const createClient = () => globalThis.testSupabase;"],
-  ["npm:web-push@4.0.0", "export const { generateRequestDetails, setVapidDetails } = globalThis.testPushLibrary;"],
+  ["npm:web-push@4.0.0", "export const { generateRequestDetails, generateVAPIDKeys } = globalThis.testPushLibrary;"],
 ]);
 const entry = new URL("./index.ts", import.meta.url).href;
 const require = createRequire(import.meta.url);
 
 registerHooks({
   load(url, context, loadNext) {
-    if (url !== entry) return loadNext(url, context);
-    const source = readFileSync(new URL(url), "utf8");
+    if (!url.startsWith(entry + "?case=")) return loadNext(url, context);
+    const source = readFileSync(new URL(entry), "utf8");
     let code;
     try {
       code = stripTypeScriptTypes(source);
@@ -100,9 +106,8 @@ registerHooks({
       : resolveNext(specifier, context);
   },
 });
-await import("./index.ts");
-
-beforeEach(() => {
+let caseNumber = 0;
+beforeEach(async () => {
   scenario = {
     env: { ...env },
     user: { id: userId, role: "authenticated" },
@@ -111,6 +116,9 @@ beforeEach(() => {
     reminders: [],
     completed: [],
     providerStatus: 201,
+    vaultPair,
+    vaultError: false,
+    keyGenerations: 0,
     calls: [],
     deleted: [],
     fetches: [],
@@ -123,6 +131,7 @@ beforeEach(() => {
     scenario.fetches.push({ url: url.href, payload: JSON.parse(new TextDecoder().decode(options.body)) });
     return new Response(null, { status: scenario.providerStatus });
   };
+  await import(entry + "?case=" + ++caseNumber);
 });
 
 function request({ body = '{"kind":"test"}', token = session, method = "POST", from = origin,
@@ -177,10 +186,33 @@ test("rejects malformed, oversized, non-JSON, and unauthorized reminder payloads
   assert.deepEqual(scenario.calls, []);
 });
 
-test("returns unavailable with missing VAPID secrets before requesting quota", async () => {
-  scenario.env.VAPID_PRIVATE_KEY = undefined;
-  assert.equal((await handler(request())).status, 503);
-  assert.deepEqual(scenario.calls, []);
+test("withholds configuration from unauthenticated callers and hides vault failures", async () => {
+  const body = '{"kind":"configuration"}';
+  assert.equal((await handler(request({ token: null, body }))).status, 401);
+  scenario.vaultError = true;
+  const failure = await handler(request({ body }));
+  assert.equal(failure.status, 500);
+  assert.deepEqual(await failure.json(), { error: "No se pudo procesar el aviso." });
+  assert.deepEqual(scenario.calls, [{ name: "saldo_get_or_initialize_vapid", params: undefined }]);
+  scenario.vaultError = false;
+  const retried = await handler(request({ body }));
+  assert.deepEqual(await retried.json(), { ok: true, vapidPublicKey: vaultPair.public_key });
+});
+
+test("initializes VAPID once across concurrent requests and returns only the saved public key", async () => {
+  scenario.vaultPair = null;
+  const body = '{"kind":"configuration"}';
+  const responses = await Promise.all([handler(request({ body })), handler(request({ body }))]);
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.deepEqual(await response.json(), { ok: true, vapidPublicKey: vaultPair.public_key });
+  }
+  assert.equal(scenario.keyGenerations, 1);
+  assert.deepEqual(scenario.calls, [
+    { name: "saldo_get_or_initialize_vapid", params: undefined },
+    { name: "saldo_get_or_initialize_vapid", params: { p_public_key: generatedPair.publicKey, p_private_key: generatedPair.privateKey } },
+  ]);
 });
 
 test("applies the limit using the verified account even when the body supplies another ID", async () => {
@@ -248,11 +280,18 @@ test("restricts cron access and dispatches only claimed accounts", async () => {
   assert.equal((await handler(request({ from: null, token: null, cron: "wrong" }))).status, 401);
   assert.equal((await handler(request({ token: null, cron: fakeCronSecret }))).status, 401);
   assert.deepEqual(scenario.calls, []);
+  assert.equal((await handler(request({ from: null, token: null, cron: "a".repeat(64) }))).status, 401);
+  assert.deepEqual(scenario.calls, [{ name: "saldo_get_cron_token", params: undefined }]);
+  scenario.calls = [];
   scenario.reminders = [{ user_id: userId, reminder_month: "2026-11", attempt_count: 1 }];
   scenario.rows = [subscription("https://web.push.apple.com/saldo-test")];
   const response = await handler(request({ from: null, token: null, cron: fakeCronSecret }));
   assert.deepEqual(await response.json(), { ok: true, sent: 1 });
-  assert.deepEqual(scenario.calls, [{ name: "saldo_claim_due_push_reminders", params: { p_limit: 24 } }]);
+  assert.deepEqual(scenario.calls, [
+    { name: "saldo_get_cron_token", params: undefined },
+    { name: "saldo_get_or_initialize_vapid", params: undefined },
+    { name: "saldo_claim_due_push_reminders", params: { p_limit: 24 } },
+  ]);
   assert.deepEqual(scenario.completed[0].filters, {
     user_id: userId, reminder_month: "2026-11", reminder_type: "monthly", attempt_count: 1,
   });

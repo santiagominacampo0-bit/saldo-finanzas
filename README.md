@@ -18,7 +18,7 @@ La app usa una clave publicable. Postgres limita el acceso a las filas mediante 
 
 1. Aplica las migraciones en `supabase/migrations`, en orden, al proyecto de Supabase. Configura en Auth la URL HTTPS del sitio y sus redirecciones.
 2. Para habilitar una cuenta administrativa ya confirmada, el propietario autoriza su UUID en `saldo_private.admins`. El panel requiere TOTP y únicamente devuelve contadores agregados. El primer registro público nunca concede el rol automáticamente.
-3. Para push instala los cuatro secretos de la función `saldo-notify` en Supabase, despliega con su autenticación de usuario y de cron configurada y guarda `saldo_cron_secret` en Vault. Aplica `supabase/schedule-reminders.sql`. Una vez verificado, establece `pushAvailable: true` en `supabase-config.js` y publica de nuevo. Los secretos privados se mantienen fuera del repositorio.
+3. Para push, aplica la migración de Vault, despliega `saldo-notify` con la verificación de usuario y cron que implementa la función, y aplica `supabase/schedule-reminders.sql`. Supabase genera las claves y las conserva cifradas en Vault. La app solicita solo la clave pública al iniciar sesión.
 4. En GitHub, configura Pages con **GitHub Actions**. El flujo publica únicamente los archivos de la aplicación.
 
 Con Saldo abierto, los avisos y el recordatorio de la hora de Colombia pueden verse en la app. Para la entrega con Saldo cerrado, se requiere el servicio push, permiso en cada dispositivo y un navegador compatible. En iPhone/iPad, Web Push requiere iOS/iPadOS 16.4 o posterior y añadir Saldo a la pantalla de inicio. [Requisitos de Web Push](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/).
@@ -29,6 +29,7 @@ Usa `python3 -m http.server 4173` en la raíz y abre `http://localhost:4173`.
 
 - `node --test tests/state.test.cjs`.
 - `node --disable-warning=ExperimentalWarning supabase/functions/saldo-notify/index.test.mjs`.
+- `node tests/browser-flows.cjs` con Playwright y el servidor local activo. Las solicitudes de cuenta se simulan.
 - `node tests/mobile-layout.cjs` con Playwright Chromium instalado, o define `CHROME_BIN` para usar Chrome. Las pruebas visuales usan datos ficticios.
 
 Lee la [política de privacidad](./privacy.html) antes de activar la sincronización.

@@ -1,15 +1,14 @@
--- Ejecutar después de aplicar las migraciones, publicar saldo-notify y guardar
--- SALDO_CRON_SECRET en Supabase Vault con el nombre saldo_cron_secret.
+-- Ejecutar después de aplicar las migraciones y publicar saldo-notify.
+-- El token se generó en Vault durante la migración 20261120040000.
 begin;
 
 create extension if not exists pg_cron with schema pg_catalog;
 create extension if not exists pg_net with schema extensions;
-create extension if not exists supabase_vault with schema vault;
 
 do $$
 begin
-  if not exists (select 1 from vault.secrets where name = 'saldo_cron_secret') then
-    raise exception 'Primero guarda saldo_cron_secret en Supabase Vault.';
+  if not exists (select 1 from vault.secrets where name = 'saldo_cron_token_v2') then
+    raise exception 'Primero aplica la migración 20261120040000_saldo_push_vault.sql.';
   end if;
 end;
 $$;
@@ -29,7 +28,7 @@ select cron.schedule(
       timeout_milliseconds := 90000
     ) as request_id
     from vault.decrypted_secrets as secret
-    where secret.name = 'saldo_cron_secret';
+    where secret.name = 'saldo_cron_token_v2';
   $$
 );
 

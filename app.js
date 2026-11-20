@@ -51,6 +51,9 @@ let installPrompt = null;
 let authUser = null;
 let cloudStatus = supabaseClient ? 'local' : 'not-configured';
 let devicePushEnabled = false;
+let pushPublicKey = '';
+let pushConfigPromise = null;
+let pushChangePending = false;
 let cloudSaveChain = Promise.resolve();
 let cloudSaveTimer = null;
 let cloudBase = null;
@@ -188,9 +191,8 @@ function handleSignedIn(user) {
   render();
   void saveCloudNow();
   void checkAdminAccess();
-  void refreshDevicePushStatus().then(() => {
-    if (activeTab === 'account' && !document.activeElement?.matches('input, select, textarea')) render();
-  });
+  void preparePushForDevice();
+
 }
 
 function handleSignedOut() {
@@ -198,6 +200,9 @@ function handleSignedOut() {
   cloudEpoch += 1;
   authUser = null;
   devicePushEnabled = false;
+  pushPublicKey = '';
+  pushConfigPromise = null;
+  pushChangePending = false;
   cloudBase = null;
   cloudDirty = false;
   cloudReset = false;
@@ -542,7 +547,7 @@ function renderAuth() {
       <h2 id="auth-title">${title}</h2><p>${description}</p>
       ${authForm}
       <div class="auth-actions">
-        ${changing || authBooting ? '' : authMode === 'signin' ? '<button class="secondary-button" data-action="guest">Usar en este dispositivo</button><button class="text-button" data-action="auth-mode" data-mode="admin">Acceso de administrador</button>' : '<button class="text-button" data-action="auth-mode" data-mode="signin">Volver al inicio de sesión</button>'}
+        ${changing || authBooting ? '' : authMode === 'signin' ? '<button class="secondary-button" data-action="guest">Usar en este dispositivo</button><button class="text-button" data-action="auth-mode" data-mode="admin">Acceso de administrador</button>' : authMode === 'signup' ? '' : '<button class="text-button" data-action="auth-mode" data-mode="signin">Volver al inicio de sesión</button>'}
         ${changing ? '<button class="text-button" data-action="sign-out">Cancelar y cerrar sesión</button>' : ''}
       </div>
       <footer class="auth-footer"><a class="text-button" href="./privacy.html">Privacidad</a></footer>
@@ -627,6 +632,11 @@ function renderAccount() {
   const reminders = state.settings.remindersEnabled;
   const notifications = state.settings.notificationsEnabled;
   const pushEnabled = Boolean(authUser && devicePushEnabled);
+  const pushSupported = 'PushManager' in window && 'Notification' in window && 'serviceWorker' in navigator;
+  const pushDescription = !authUser ? 'Inicia sesión para configurar avisos en segundo plano.'
+    : !pushSupported ? 'En iPhone abre Saldo desde la pantalla de inicio. En Android, usa Chrome.'
+    : !pushPublicKey ? 'El servicio de avisos todavía no está disponible.'
+    : 'Recibe avisos aunque Saldo esté cerrada.';
   const statusLabel = cloudStatusLabel();
   const local = readState(STORE_KEY);
   const hasLocalRecords = local.transactions.length || Object.keys(local.budgets).length || local.profile.name;
@@ -641,7 +651,7 @@ function renderAccount() {
       <section class="form-section"><h3>Mi perfil</h3><p>El nombre solo se usa para personalizar el saludo en este dispositivo.</p><form id="profile-form"><div class="form-grid"><div class="field full"><label for="profile-name">¿Cómo te llamamos?</label><input id="profile-name" name="name" maxlength="48" value="${escapeHTML(name)}" placeholder="Tu nombre" autocomplete="name" /></div><div class="field"><label>Moneda</label><input value="Peso colombiano (COP)" disabled aria-label="Moneda peso colombiano" /></div><div class="field"><label>Registros guardados</label><input value="${state.transactions.length}" disabled aria-label="Cantidad de movimientos" /></div></div><div class="form-actions"><button class="primary-button" type="submit">Guardar perfil</button></div></form></section>
       <section class="form-section"><h3>Recordatorios</h3><p>Elige cuándo quieres recibir avisos de presupuesto y recordatorios.</p>
         <div class="setting-row"><div><strong>Avisos de presupuesto</strong><small>Te avisa cuando un gasto registrado alcanza el 80% o supera un presupuesto.</small></div><button class="switch ${notifications ? 'on' : ''}" data-action="toggle-notifications" role="switch" aria-checked="${notifications}" aria-label="Activar avisos de presupuesto"></button></div>
-        <div class="setting-row"><div><strong>Notificaciones push</strong><small>${!cloudConfig.pushAvailable ? 'El envío en segundo plano aún no está activo.' : authUser ? 'Recibe avisos incluso cuando Saldo está cerrada.' : 'Inicia sesión para activar los avisos cuando la app está cerrada.'}</small></div><button class="switch ${pushEnabled ? 'on' : ''}" data-action="toggle-push" role="switch" aria-checked="${pushEnabled}" aria-label="Activar notificaciones push" ${authUser && cloudConfig.pushAvailable ? '' : 'disabled'}></button></div>
+        <div class="setting-row"><div><strong>Notificaciones push</strong><small>${pushDescription}</small></div><button class="switch ${pushEnabled ? 'on' : ''}" data-action="toggle-push" role="switch" aria-checked="${pushEnabled}" aria-label="Activar notificaciones push" ${authUser && pushSupported && pushPublicKey && !pushChangePending ? '' : 'disabled'}></button></div>
         <div class="setting-row"><div><strong>Recordatorio mensual</strong><small>Te invita a revisar tus movimientos en el día y hora que elijas.</small></div><button class="switch ${reminders ? 'on' : ''}" data-action="toggle-reminders" role="switch" aria-checked="${reminders}" aria-label="Activar recordatorio mensual"></button></div>
         <div class="reminder-controls"><label>Día del mes<select name="reminder-day" id="reminder-day">${Array.from({ length: 28 }, (_, i) => i + 1).map(day => `<option value="${day}" ${String(day) === String(state.settings.reminderDay) ? 'selected' : ''}>${day}</option>`).join('')}</select></label><label>Hora aproximada<input id="reminder-time" required type="time" value="${escapeHTML(state.settings.reminderTime)}" /></label></div>
         <div class="account-actions"><button class="secondary-button" data-action="test-notification">${svg('bell')} Enviar aviso de prueba</button></div>
@@ -768,21 +778,32 @@ function decodeVapidKey(value) {
   return Uint8Array.from(raw, character => character.charCodeAt(0));
 }
 
-async function refreshDevicePushStatus() {
-  if (!cloudConfig.pushAvailable || !authUser || !supabaseClient || !('serviceWorker' in navigator) || !('PushManager' in window)) {
-    devicePushEnabled = false;
-    return;
-  }
-  try {
-    const registration = await navigator.serviceWorker?.getRegistration();
-    const subscription = await registration?.pushManager?.getSubscription();
-    if (!subscription) { devicePushEnabled = false; return; }
-    const { data, error } = await supabaseClient.from('push_subscriptions')
-      .select('endpoint').eq('user_id', authUser.id).eq('endpoint', subscription.endpoint).maybeSingle();
-    devicePushEnabled = !error && Boolean(data);
-  } catch {
-    devicePushEnabled = false;
-  }
+async function preparePushForDevice() {
+  if (!authUser || !supabaseClient || !('serviceWorker' in navigator) || !('PushManager' in window)) return false;
+  if (pushConfigPromise) return pushConfigPromise;
+  const epoch = cloudEpoch;
+  const userId = authUser.id;
+  const request = (async () => {
+    try {
+      const { data, error } = await supabaseClient.functions.invoke('saldo-notify', { body: { kind: 'configuration' } });
+      if (cloudEpoch !== epoch) return false;
+      if (error || !/^B[A-Za-z0-9_-]{86}$/.test(data?.vapidPublicKey || '')) return false;
+      pushPublicKey = data.vapidPublicKey;
+      const registration = await navigator.serviceWorker.getRegistration();
+      const subscription = await registration?.pushManager?.getSubscription();
+      if (cloudEpoch !== epoch) return false;
+      if (subscription) {
+        const { data: record } = await supabaseClient.from('push_subscriptions')
+          .select('endpoint').eq('user_id', userId).eq('endpoint', subscription.endpoint).maybeSingle();
+        if (cloudEpoch === epoch) devicePushEnabled = Boolean(record);
+      }
+      if (cloudEpoch === epoch && activeTab === 'account' && !document.activeElement?.matches('input, select, textarea')) render();
+      return cloudEpoch === epoch;
+    } catch { return false; }
+  })();
+  pushConfigPromise = request;
+  void request.finally(() => { if (pushConfigPromise === request) pushConfigPromise = null; });
+  return request;
 }
 
 async function sendPushNotification(kind = 'test') {
@@ -793,12 +814,14 @@ async function sendPushNotification(kind = 'test') {
 }
 
 async function enablePushNotifications() {
-  if (!authUser || !cloudConfig.pushAvailable) { toast('El envío push no está disponible en este momento.', 'info'); return; }
+  if (!authUser || !pushPublicKey || pushChangePending) return;
   if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
     toast('Este dispositivo no admite notificaciones push web.', 'error');
     return;
   }
-  if (!cloudConfig.vapidPublicKey) { toast('Falta configurar la clave pública de push.', 'error'); return; }
+  const publicKey = pushPublicKey;
+  const pushEpoch = cloudEpoch;
+  pushChangePending = true;
   const pushUserId = authUser.id;
   let subscription = null;
   try {
@@ -812,8 +835,9 @@ async function enablePushNotifications() {
     subscription = await registration.pushManager.getSubscription();
     if (!subscription) subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: decodeVapidKey(cloudConfig.vapidPublicKey),
+      applicationServerKey: decodeVapidKey(publicKey),
     });
+    if (cloudEpoch !== pushEpoch) return;
     const keys = subscription.toJSON().keys || {};
     if (!keys.p256dh || !keys.auth) throw new Error('El navegador no entregó las claves de suscripción.');
     const { error } = await supabaseClient.from('push_subscriptions').upsert({
@@ -823,10 +847,13 @@ async function enablePushNotifications() {
       auth: keys.auth,
     }, { onConflict: 'user_id,endpoint' });
     if (error) throw error;
+    if (cloudEpoch !== pushEpoch) return;
     devicePushEnabled = true;
+    pushChangePending = false;
     render();
     toast('Push activado para este dispositivo. Puedes enviar un aviso de prueba.');
   } catch {
+    if (cloudEpoch !== pushEpoch) return;
     if (subscription) {
       await supabaseClient.from('push_subscriptions').delete()
         .eq('user_id', pushUserId).eq('endpoint', subscription.endpoint);
@@ -835,6 +862,8 @@ async function enablePushNotifications() {
     devicePushEnabled = false;
     render();
     toast('No se pudo activar push. Revisa tu conexión y vuelve a intentarlo.', 'error');
+  } finally {
+    if (cloudEpoch === pushEpoch) pushChangePending = false;
   }
 }
 
@@ -1037,6 +1066,7 @@ function handleAction(button) {
   }
   if (action === 'sync-now') {
     cloudStatus = 'saving'; render();
+    if (!pushPublicKey) void preparePushForDevice();
     void saveCloudNow().then(saved => {
       render();
       toast(saved ? 'Tus datos están sincronizados.' : 'No se pudo sincronizar. Conservamos los datos en este dispositivo.', saved ? 'success' : 'error');
@@ -1109,7 +1139,10 @@ function installApp() {
 root.addEventListener('click', event => {
   const tab = event.target.closest('[data-tab]');
   if (tab) {
-    if (activeTab !== tab.dataset.tab) { activeTab = tab.dataset.tab; render(); window.scrollTo(0, 0); }
+    if (activeTab !== tab.dataset.tab) {
+      activeTab = tab.dataset.tab; render(); window.scrollTo(0, 0);
+      if (activeTab === 'account' && !pushPublicKey) void preparePushForDevice();
+    }
     return;
   }
   const button = event.target.closest('[data-action]');

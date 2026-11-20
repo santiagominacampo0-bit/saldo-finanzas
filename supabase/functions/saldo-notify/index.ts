@@ -1,5 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.119.2";
-import { generateRequestDetails, setVapidDetails } from "npm:web-push@4.0.0";
+import { generateRequestDetails, generateVAPIDKeys } from "npm:web-push@4.0.0";
 
 const appOrigin = "https://santiagominacampo0-bit.github.io";
 const appUrl = appOrigin + "/saldo-finanzas/";
@@ -17,26 +17,48 @@ const messages = {
   monthly: { title: "Saldo · Recordatorio", body: "Tómate un momento para revisar tus movimientos y presupuestos." },
 } as const;
 
-type UserKind = "test" | "budget_80" | "budget_100";
+type UserKind = "configuration" | "test" | "budget_80" | "budget_100";
 type Kind = keyof typeof messages;
 type PushRow = { endpoint: string; p256dh: string; auth: string };
 type Reminder = { user_id: string; reminder_month: string; attempt_count: number };
+type VaultVapidRow = { public_key: string; private_key: string };
+type VapidDetails = { subject: string; publicKey: string; privateKey: string };
 type Admin = ReturnType<typeof makeAdmin>;
+let vapidConfiguration: Promise<VapidDetails> | undefined;
 
 function makeAdmin() {
   const url = Deno.env.get("SUPABASE_URL");
-  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const secretKeys = Deno.env.get("SUPABASE_SECRET_KEYS");
+  const key = (secretKeys ? JSON.parse(secretKeys).default : null) || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!url || !key) throw new Error("Base de datos sin configurar.");
   return createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 }
 
-function configureVapid() {
-  const subject = Deno.env.get("VAPID_SUBJECT");
-  const publicKey = Deno.env.get("VAPID_PUBLIC_KEY");
-  const privateKey = Deno.env.get("VAPID_PRIVATE_KEY");
-  if (!subject || !publicKey || !privateKey) return false;
-  setVapidDetails(subject, publicKey, privateKey);
-  return true;
+async function loadVapidDetails(admin: Admin): Promise<VapidDetails> {
+  const stored = await admin.rpc("saldo_get_or_initialize_vapid");
+  if (stored.error) throw new Error("No se pudo leer la configuración de avisos.");
+  let row = (stored.data as VaultVapidRow[] | null)?.[0];
+
+  if (!row) {
+    const candidate = generateVAPIDKeys();
+    const initialized = await admin.rpc("saldo_get_or_initialize_vapid", {
+      p_public_key: candidate.publicKey,
+      p_private_key: candidate.privateKey,
+    });
+    if (initialized.error) throw new Error("No se pudo guardar la configuración de avisos.");
+    row = (initialized.data as VaultVapidRow[] | null)?.[0];
+  }
+
+  if (!row?.public_key || !row.private_key) throw new Error("La configuración de avisos está incompleta.");
+  return { subject: appUrl, publicKey: row.public_key, privateKey: row.private_key };
+}
+
+function getVapidDetails(admin: Admin) {
+  vapidConfiguration ??= loadVapidDetails(admin).catch((error) => {
+    vapidConfiguration = undefined;
+    throw error;
+  });
+  return vapidConfiguration;
 }
 
 function corsHeaders(origin: string | null): HeadersInit {
@@ -50,7 +72,10 @@ function corsHeaders(origin: string | null): HeadersInit {
 }
 
 function reply(body: object, status: number, origin: string | null, extraHeaders = {}) {
-  return Response.json(body, { status, headers: { ...corsHeaders(origin), ...extraHeaders } });
+  return Response.json(body, {
+    status,
+    headers: { "Cache-Control": "no-store", ...corsHeaders(origin), ...extraHeaders },
+  });
 }
 
 function matchesCronSecret(provided: string, expected: string) {
@@ -80,7 +105,7 @@ async function readUserKind(request: Request): Promise<UserKind | null> {
       json += decoder.decode(value, { stream: true });
     }
     const kind = JSON.parse(json + decoder.decode())?.kind;
-    return kind === "test" || kind === "budget_80" || kind === "budget_100" ? kind : null;
+    return kind === "configuration" || kind === "test" || kind === "budget_80" || kind === "budget_100" ? kind : null;
   } catch {
     return null;
   } finally {
@@ -109,7 +134,7 @@ function validSubscription(row: PushRow) {
   return trustedEndpoint(row.endpoint) && /^B[A-Za-z0-9_-]{86}$/.test(row.p256dh) && /^[A-Za-z0-9_-]{22}$/.test(row.auth);
 }
 
-async function deliverToDevice(row: PushRow, kind: Kind) {
+async function deliverToDevice(row: PushRow, kind: Kind, vapidDetails: VapidDetails) {
   const endpoint = trustedEndpoint(row.endpoint);
   if (!endpoint || !validSubscription(row)) return "invalid";
 
@@ -121,6 +146,7 @@ async function deliverToDevice(row: PushRow, kind: Kind) {
     }, JSON.stringify({ ...messages[kind], url: appUrl, tag: "saldo-" + kind }), {
       contentEncoding: "aes128gcm",
       TTL: kind === "test" ? 300 : 86400,
+      vapidDetails,
     });
   } catch {
     return "invalid";
@@ -146,14 +172,14 @@ async function deliverToDevice(row: PushRow, kind: Kind) {
   }
 }
 
-async function deliverToUser(admin: Admin, userId: string, kind: Kind) {
+async function deliverToUser(admin: Admin, userId: string, kind: Kind, vapid: VapidDetails) {
   const { data, error } = await admin.from("push_subscriptions")
     .select("endpoint,p256dh,auth").eq("user_id", userId)
     .order("created_at", { ascending: false }).limit(maxDevices);
   if (error) throw new Error("No se pudieron consultar los dispositivos.");
 
   const rows = (data || []) as PushRow[];
-  const outcomes = await Promise.all(rows.map((row) => deliverToDevice(row, kind)));
+  const outcomes = await Promise.all(rows.map((row) => deliverToDevice(row, kind, vapid)));
   const invalid = rows.filter((_, index) => outcomes[index] === "invalid").map((row) => row.endpoint);
   if (invalid.length) {
     const { error: deleteError } = await admin.from("push_subscriptions")
@@ -168,8 +194,8 @@ async function deliverToUser(admin: Admin, userId: string, kind: Kind) {
   };
 }
 
-async function deliverReminder(admin: Admin, reminder: Reminder) {
-  const result = await deliverToUser(admin, reminder.user_id, "monthly");
+async function deliverReminder(admin: Admin, reminder: Reminder, vapid: VapidDetails) {
+  const result = await deliverToUser(admin, reminder.user_id, "monthly", vapid);
   // If no device accepted the alert, the four-minute lease lets a later cron run retry.
   // After a partial delivery, avoid sending a duplicate to devices that accepted it.
   if (result.sent || !result.transientFailures) {
@@ -182,14 +208,14 @@ async function deliverReminder(admin: Admin, reminder: Reminder) {
   return result.sent;
 }
 
-async function dispatchMonthlyReminders(admin: Admin) {
+async function dispatchMonthlyReminders(admin: Admin, vapid: VapidDetails) {
   const { data, error } = await admin.rpc("saldo_claim_due_push_reminders", { p_limit: reminderBatchSize });
   if (error) throw new Error("No se pudieron reservar recordatorios.");
   const reminders = (data || []) as Reminder[];
   let sent = 0;
   for (let start = 0; start < reminders.length; start += reminderConcurrency) {
     const batch = reminders.slice(start, start + reminderConcurrency);
-    const results = await Promise.allSettled(batch.map((reminder) => deliverReminder(admin, reminder)));
+    const results = await Promise.allSettled(batch.map((reminder) => deliverReminder(admin, reminder, vapid)));
     for (const result of results) {
       if (result.status === "fulfilled") sent += result.value;
       else console.error("No se pudo entregar un recordatorio.");
@@ -207,10 +233,14 @@ Deno.serve(async (request) => {
   try {
     const cronToken = request.headers.get("x-saldo-cron-secret");
     if (cronToken !== null) {
-      const expected = Deno.env.get("SALDO_CRON_SECRET") || "";
-      if (origin || !matchesCronSecret(cronToken, expected)) return reply({ error: "Credencial inválida." }, 401, origin);
-      if (!configureVapid()) return reply({ error: "Avisos push todavía por configurar." }, 503, origin);
-      const sent = await dispatchMonthlyReminders(makeAdmin());
+      if (origin || !/^[a-f0-9]{64}$/.test(cronToken)) return reply({ error: "Credencial inválida." }, 401, origin);
+      const admin = makeAdmin();
+      const { data: expected, error } = await admin.rpc("saldo_get_cron_token");
+      if (error) throw new Error("No se pudo verificar la ejecución programada.");
+      if (typeof expected !== "string" || !matchesCronSecret(cronToken, expected)) {
+        return reply({ error: "Credencial inválida." }, 401, origin);
+      }
+      const sent = await dispatchMonthlyReminders(admin, await getVapidDetails(admin));
       return reply({ ok: true, sent }, 200, origin);
     }
 
@@ -224,12 +254,16 @@ Deno.serve(async (request) => {
 
     const kind = await readUserKind(request);
     if (!kind) return reply({ error: "Tipo de aviso inválido." }, 400, origin);
-    if (!configureVapid()) return reply({ error: "Avisos push todavía por configurar." }, 503, origin);
+    if (kind === "configuration") {
+      const { publicKey } = await getVapidDetails(admin);
+      return reply({ ok: true, vapidPublicKey: publicKey }, 200, origin);
+    }
+
     const { data: quota, error: quotaError } = await admin.rpc("saldo_claim_push_quota", { p_user_id: user.id });
     if (quotaError) throw new Error("No se pudo comprobar la cuota de avisos.");
     if (!quota) return reply({ error: "Espera unos minutos antes de enviar más avisos." }, 429, origin, { "Retry-After": "300" });
 
-    const result = await deliverToUser(admin, user.id, kind);
+    const result = await deliverToUser(admin, user.id, kind, await getVapidDetails(admin));
     if (!result.sent && result.transientFailures) {
       return reply({ error: "No se pudieron entregar los avisos ahora." }, 502, origin);
     }
