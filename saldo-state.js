@@ -4,6 +4,9 @@
     income: ['Salario', 'Ventas', 'Freelance', 'Inversiones', 'Otros ingresos'],
     expense: ['Alimentación', 'Transporte', 'Hogar', 'Salud', 'Educación', 'Ocio', 'Servicios', 'Deudas', 'Otros gastos'],
   };
+  const commonJS = typeof module === 'object' && module.exports;
+  const planning = commonJS ? require('./saldo-planning.js') : root.SaldoPlanning;
+  const recurrence = commonJS ? require('./saldo-recurrence.js') : root.SaldoRecurrence;
   const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const plainText = (value, limit) => typeof value === 'string' ? value.trim().slice(0, limit) : '';
   const validMonth = value => /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
@@ -18,6 +21,7 @@
 
   function normalize(input) {
     const data = record(input);
+    const wallets = planning.normalizeWallets(data.wallets);
     const transactions = new Map();
     for (const raw of Array.isArray(data.transactions) ? data.transactions : []) {
       const tx = record(raw);
@@ -30,6 +34,7 @@
         id, type, title, date: tx.date, amount: tx.amount,
         category: allowed.includes(tx.category) ? tx.category : allowed.at(-1),
         note: plainText(tx.note, 120),
+        ...(Object.hasOwn(wallets, tx.walletId) ? { walletId: tx.walletId } : {}),
       });
     }
     const budgets = {};
@@ -45,12 +50,20 @@
         alertedBudgets[key] = stage;
       }
     }
+    const recurring = recurrence.normalizeRecurring(data.recurring, categories);
+    for (const item of Object.values(recurring)) {
+      if (item.walletId && !Object.hasOwn(wallets, item.walletId)) delete item.walletId;
+    }
     const settings = record(data.settings);
     const day = String(settings.reminderDay ?? '');
     return {
       profile: { name: plainText(record(data.profile).name, 48) },
       transactions: [...transactions.values()].sort((a, b) => a.id.localeCompare(b.id)),
       budgets,
+      wallets,
+      transfers: planning.normalizeTransfers(data.transfers, wallets),
+      recurring,
+      goals: planning.normalizeGoals(data.goals),
       settings: {
         notificationsEnabled: settings.notificationsEnabled === true,
         remindersEnabled: settings.remindersEnabled === true,
@@ -74,6 +87,7 @@
   }
 
   const map = value => new Map(Object.entries(value));
+  const mergeCollection = (base, local, remote) => Object.fromEntries(mergeMap(map(base || {}), map(local || {}), map(remote || {})));
   const txMap = entries => new Map(entries.map(tx => [tx.id, tx]));
 
   // Apply the changes made on this device over the latest cloud snapshot.
@@ -88,6 +102,10 @@
       profile: Object.fromEntries(mergeMap(map(base.profile), map(local.profile), map(remote.profile))),
       transactions: [...mergeMap(txMap(base.transactions), txMap(local.transactions), txMap(remote.transactions)).values()],
       budgets,
+      wallets: mergeCollection(base.wallets, local.wallets, remote.wallets),
+      transfers: mergeCollection(base.transfers, local.transfers, remote.transfers),
+      recurring: mergeCollection(base.recurring, local.recurring, remote.recurring),
+      goals: mergeCollection(base.goals, local.goals, remote.goals),
       settings: Object.fromEntries(mergeMap(map(base.settings), map(local.settings), map(remote.settings))),
       alertedBudgets: Object.fromEntries(mergeMap(map(base.alertedBudgets), map(local.alertedBudgets), map(remote.alertedBudgets))),
       lastReminder: local.lastReminder === base.lastReminder ? remote.lastReminder : local.lastReminder,

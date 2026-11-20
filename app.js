@@ -43,6 +43,10 @@ const root = document.getElementById('app');
 let storageKey = STORE_KEY;
 let state = readState(STORE_KEY);
 let activeTab = 'home';
+let plannerView = 'budgets';
+let dataPanelOpen = false;
+let deletePanelOpen = false;
+let cloudSavedAt = '';
 let viewMonth = currentMonth();
 let transactionFilter = 'all';
 let searchTerm = '';
@@ -82,7 +86,7 @@ function readState(key) {
 }
 
 function storeState() {
-  const payload = authUser ? { state, base: cloudBase, dirty: cloudDirty, reset: cloudReset } : state;
+  const payload = authUser ? { state, base: cloudBase, dirty: cloudDirty, reset: cloudReset, lastSave: cloudSavedAt } : state;
   try { localStorage.setItem(storageKey, JSON.stringify(payload)); return true; }
   catch { return false; }
 }
@@ -99,10 +103,11 @@ async function synchronizeUser(userId, epoch) {
   const current = () => authUser?.id === userId && cloudEpoch === epoch;
   if (!current()) return false;
   cloudStatus = 'saving';
+  updateCloudStatus();
   try {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const remoteResult = await supabaseClient.from('saldo_data')
-        .select('payload,version').eq('user_id', userId).maybeSingle();
+        .select('payload,version,updated_at').eq('user_id', userId).maybeSingle();
       if (!current()) return false;
       if (remoteResult.error) throw remoteResult.error;
       const row = remoteResult.data;
@@ -111,6 +116,7 @@ async function synchronizeUser(userId, epoch) {
       const resetting = cloudReset;
       const next = resetting ? local : cloudDirty ? mergeStates(cloudBase || blankState(), local, remote) : remote;
 
+      let savedAt = row?.updated_at || '';
       if ((!row && cloudDirty) || (row && !sameState(next, remote))) {
         const payload = { payload: next, version: (row?.version || 0) + 1, updated_at: new Date().toISOString() };
         if (row) {
@@ -123,6 +129,7 @@ async function synchronizeUser(userId, epoch) {
           if (saved.error?.code === '23505') continue;
           if (saved.error) throw saved.error;
         }
+        savedAt = payload.updated_at;
       }
 
       if (!current()) return false;
@@ -132,6 +139,7 @@ async function synchronizeUser(userId, epoch) {
       const changed = !sameState(merged, latestLocal);
       state = merged;
       cloudBase = next;
+      cloudSavedAt = savedAt;
       cloudReset = resetDuringWrite;
       cloudDirty = cloudReset || !sameState(merged, next);
       cloudStatus = cloudDirty ? 'pending' : 'synced';
@@ -186,6 +194,9 @@ function handleSignedIn(user) {
   cloudBase = stored?.base ? normalizeState(stored.base) : null;
   cloudDirty = Boolean(stored?.dirty || (stored && !stored.state));
   cloudReset = Boolean(stored?.reset);
+  cloudSavedAt = typeof stored?.lastSave === 'string' ? stored.lastSave : '';
+  plannerView = 'budgets';
+  dataPanelOpen = deletePanelOpen = false;
   activeTab = 'home';
   modal = null;
   render();
@@ -206,6 +217,9 @@ function handleSignedOut() {
   cloudBase = null;
   cloudDirty = false;
   cloudReset = false;
+  cloudSavedAt = '';
+  plannerView = 'budgets';
+  dataPanelOpen = deletePanelOpen = false;
   guestMode = false;
   authBooting = false;
   authMode = 'signin';
@@ -249,7 +263,8 @@ function escapeHTML(value = '') {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
-function currentMonth(date = new Date()) {
+function currentMonth(date) {
+  if (!date) return todayString().slice(0, 7);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
@@ -278,11 +293,11 @@ function formatDate(value, options = { day: 'numeric', month: 'short' }) {
 }
 
 function todayString() {
-  const today = new Date();
-  const y = today.getFullYear();
-  const m = String(today.getMonth() + 1).padStart(2, '0');
-  const d = String(today.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const date = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return date.year + '-' + date.month + '-' + date.day;
 }
 
 function transactionsIn(month, type) {
@@ -308,7 +323,7 @@ function spentByCategory(month = viewMonth) {
 }
 
 function percent(used, total) {
-  return total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0;
+  return total > 0 ? Math.round(used / total * 100) : 0;
 }
 
 function progressClass(used, total) {
@@ -327,14 +342,15 @@ function categoryIcon(category) {
 }
 
 function navButton(item, mobile = false) {
-  return `<button class="nav-button ${activeTab === item.id ? 'active' : ''}" data-tab="${item.id}" aria-label="${item.label}" ${activeTab === item.id ? 'aria-current="page"' : ''}><span class="nav-icon">${svg(item.icon)}</span><span>${item.label}</span></button>`;
+  const selected = activeTab === item.id || (activeTab === 'admin' && item.id === 'account');
+  return `<button class="nav-button ${selected ? 'active' : ''}" data-tab="${item.id}" aria-label="${item.label}" ${selected ? 'aria-current="page"' : ''}><span class="nav-icon">${svg(item.icon)}</span><span>${item.label}</span></button>`;
 }
 
 function shell() {
   const name = state.profile.name.trim();
   const initial = name ? escapeHTML(name[0].toUpperCase()) : 'S';
   const greeting = name ? `Hola, ${escapeHTML(name)}` : 'Hola, ¿cómo vas?';
-  const topTitle = activeTab === 'admin' ? 'Administración' : NAV.find(item => item.id === activeTab)?.label || 'Inicio';
+  const topTitle = activeTab === 'admin' ? 'Panel del dueño' : NAV.find(item => item.id === activeTab)?.label || 'Inicio';
   const profileCaption = authUser ? cloudStatusLabel() : 'Este dispositivo';
   const privacyTitle = authUser ? 'Cuenta protegida' : 'Tu información es privada';
   const privacyCopy = authUser ? 'Tus datos se guardan en este dispositivo y se sincronizan con tu cuenta.' : 'Los movimientos permanecen en este dispositivo hasta que inicies sesión.';
@@ -346,14 +362,14 @@ function shell() {
       <nav class="nav-list" aria-label="Principal">${NAV.map(item => navButton(item)).join('')}</nav>
       <div class="sidebar-bottom">
         <div class="privacy-note"><strong>${privacyTitle}</strong>${privacyCopy}</div>
-        <div class="profile-chip"><span class="avatar">${initial}</span><span class="profile-info"><span class="profile-name">${escapeHTML(name) || 'Mi perfil'}</span><span class="profile-caption">${profileCaption}</span></span></div>
+        <div class="profile-chip"><span class="avatar">${initial}</span><span class="profile-info"><span class="profile-name">${escapeHTML(name) || 'Mi perfil'}</span><span class="profile-caption" ${authUser ? 'data-cloud-status' : ''}>${profileCaption}</span></span></div>
       </div>
     </aside>
     <main class="main-area">
       <header class="topbar">
         <div class="topbar-greeting"><p class="eyebrow">${escapeHTML(dateLine)}</p><h1>${activeTab === 'home' ? greeting : topTitle}</h1></div>
         <div class="topbar-actions">
-          ${['home', 'movements', 'budgets', 'reports'].includes(activeTab) ? `<div class="month-picker" aria-label="Mes"><button class="icon-button" data-action="prev-month" aria-label="Mes anterior">${svg('left')}</button><span>${escapeHTML(monthName(viewMonth))}</span><button class="icon-button" data-action="next-month" aria-label="Mes siguiente">${svg('right')}</button></div>` : ''}
+          ${(['home', 'movements', 'reports'].includes(activeTab) || (activeTab === 'budgets' && plannerView === 'budgets')) ? `<div class="month-picker" aria-label="Mes"><button class="icon-button" data-action="prev-month" aria-label="Mes anterior">${svg('left')}</button><span>${escapeHTML(monthName(viewMonth))}</span><button class="icon-button" data-action="next-month" aria-label="Mes siguiente">${svg('right')}</button></div>` : ''}
           <button class="primary-button" data-action="new-transaction">${svg('plus')}<span>Nuevo movimiento</span></button>
         </div>
       </header>
@@ -368,7 +384,7 @@ function shell() {
 
 function renderView() {
   if (activeTab === 'movements') return renderMovements();
-  if (activeTab === 'budgets') return renderBudgets();
+  if (activeTab === 'budgets') return renderPlanning();
   if (activeTab === 'reports') return renderReports();
   if (activeTab === 'account') return renderAccount();
   if (activeTab === 'admin' && authUser) return renderAdmin();
@@ -378,17 +394,18 @@ function renderView() {
 function renderHome() {
   const incomes = totalFor(viewMonth, 'income');
   const expenses = totalFor(viewMonth, 'expense');
-  const balance = lifetimeBalance();
-  const expensesPct = incomes > 0 ? Math.min(100, Math.round(expenses / incomes * 100)) : 0;
+  const balance = incomes - expenses;
+  const accumulated = lifetimeBalance();
+  const expensesPct = percent(expenses, incomes);
   const recent = state.transactions.filter(tx => tx.date?.slice(0, 7) === viewMonth).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 4);
   const budgets = monthBudgets();
   const spent = spentByCategory();
   const visibleBudgets = Object.entries(budgets).filter(([, value]) => Number(value) > 0).slice(0, 4);
   return `<section class="hero-grid">
     <article class="balance-card">
-      <div class="balance-top"><span class="balance-label">Balance registrado</span><span class="private-pill">${svg('lock')} ${authUser ? cloudStatusLabel() : 'Solo en este dispositivo'}</span></div>
+      <div class="balance-top"><span class="balance-label">Balance del mes</span><span class="private-pill">${svg('lock')} <span ${authUser ? 'data-cloud-status' : ''}>${authUser ? cloudStatusLabel() : 'Solo en este dispositivo'}</span></span></div>
       <div class="balance-amount">${formatMoney(balance)}</div>
-      <div class="balance-foot"><span>Resultado de todos tus movimientos guardados</span></div>
+      <div class="balance-foot"><span>Acumulado de movimientos: ${formatMoney(accumulated)}</span></div>
     </article>
     <div class="month-summary">
       <article class="stat-card"><div class="stat-copy"><div class="stat-label">Ingresos del mes</div><div class="stat-value">${formatMoney(incomes)}</div><div class="stat-meta">${transactionsIn(viewMonth, 'income').length} ${transactionsIn(viewMonth, 'income').length === 1 ? 'registro' : 'registros'}</div></div><span class="stat-icon income">${svg('income')}</span></article>
@@ -397,8 +414,8 @@ function renderHome() {
   </section>
   <section class="section-grid">
     <article class="panel panel-pad">
-      <div class="section-heading"><div><h2>Tu ritmo, mes a mes</h2><p>Ingresos y gastos registrados en COP</p></div><button class="text-button" data-tab="reports">Ver reporte</button></div>
-      ${renderMiniChart()}
+      <div class="section-heading"><div><h2>Próximos vencimientos</h2><p>Pagos e ingresos que programaste.</p></div><button class="text-button" data-action="planner-view" data-view="recurring">Ver recurrentes</button></div>
+      ${renderRecurringPreview()}
     </article>
     <article class="panel panel-pad">
       <div class="section-heading"><div><h2>Presupuestos</h2><p>${escapeHTML(monthName(viewMonth))}</p></div><button class="text-button" data-tab="budgets">Ver todos</button></div>
@@ -411,24 +428,9 @@ function renderHome() {
   </section>`;
 }
 
-function renderMiniChart() {
-  const months = Array.from({ length: 6 }, (_, index) => shiftMonth(viewMonth, index - 5));
-  if (!months.some(month => state.transactions.some(tx => tx.date?.slice(0, 7) === month))) {
-    return `<div class="chart-empty"><span class="empty-icon">${svg('chart')}</span><p>Cuando registres ingresos o gastos, aparecerán aquí por mes.</p><button class="text-button" data-action="new-transaction">Añadir primer movimiento</button></div>`;
-  }
-  const max = Math.max(1, ...months.flatMap(month => [totalFor(month, 'income'), totalFor(month, 'expense')]));
-  return `<div class="chart-area" role="img" aria-label="Barras de ingresos y gastos de los últimos seis meses">${months.map(month => {
-    const income = totalFor(month, 'income');
-    const expense = totalFor(month, 'expense');
-    const h1 = income ? Math.max(5, Math.round(income / max * 132)) : 2;
-    const h2 = expense ? Math.max(5, Math.round(expense / max * 132)) : 2;
-    return `<div class="chart-item"><div class="chart-columns"><span class="chart-column income" style="height:${h1}px" title="Ingresos ${formatMoney(income)}"></span><span class="chart-column expense" style="height:${h2}px" title="Gastos ${formatMoney(expense)}"></span></div><span class="chart-month">${escapeHTML(monthName(month, false).slice(0, 3))}</span></div>`;
-  }).join('')}</div><div class="legend"><span class="legend-item"><span class="legend-dot"></span>Ingresos</span><span class="legend-item"><span class="legend-dot expense"></span>Gastos</span></div>`;
-}
-
 function budgetRow(category, amount, used) {
   const ratio = percent(used, amount);
-  return `<div class="budget-row"><div class="budget-row-top"><span class="budget-category"><span class="category-dot"></span>${escapeHTML(category)}</span><span class="budget-amount">${formatMoney(used)} de ${formatMoney(amount)}</span></div><div class="progress"><div class="progress-fill ${progressClass(used, amount)}" style="width:${ratio}%"></div></div></div>`;
+  return `<div class="budget-row"><div class="budget-row-top"><span class="budget-category"><span class="category-dot"></span>${escapeHTML(category)}</span><span class="budget-amount">${formatMoney(used)} de ${formatMoney(amount)}</span></div><div class="progress"><div class="progress-fill ${progressClass(used, amount)}" style="width:${Math.min(100, ratio)}%"></div></div></div>`;
 }
 
 function transactionRow(tx, full = false) {
@@ -462,15 +464,17 @@ function renderBudgets() {
   const spent = spentByCategory();
   const allCats = CATEGORIES.expense;
   const totalBudget = Object.values(budgets).reduce((sum, value) => sum + Number(value || 0), 0);
-  const totalSpent = totalFor(viewMonth, 'expense');
+  const totalSpent = Object.keys(budgets).reduce((sum, category) => sum + (spent[category] || 0), 0);
+  const unbudgeted = totalFor(viewMonth, 'expense') - totalSpent;
   const remaining = totalBudget - totalSpent;
-  return `<div class="page-title-row"><div><h2>Presupuestos por categoría</h2><p>Un límite mensual te ayuda a decidir con más calma.</p></div><button class="secondary-button" data-action="export-csv">${svg('download')} Exportar CSV</button></div>
-    <article class="budget-total-card"><div><div class="budget-total-label">Límite definido para ${escapeHTML(monthName(viewMonth))}</div><div class="budget-total-value">${formatMoney(totalBudget)}</div></div><div class="budget-total-right"><span>Gastado registrado</span><strong>${formatMoney(totalSpent)}</strong><span style="margin-top:5px">${totalBudget ? `${formatMoney(Math.max(0, remaining))} ${remaining >= 0 ? 'disponibles' : 'por encima'}` : 'Define tus límites'}</span></div></article>
+  return `<div class="page-title-row"><div><h2>Presupuestos por categoría</h2><p>Define un límite mensual para cada categoría.</p></div></div>
+    <article class="budget-total-card"><div><div class="budget-total-label">Límite definido para ${escapeHTML(monthName(viewMonth))}</div><div class="budget-total-value">${formatMoney(totalBudget)}</div></div><div class="budget-total-right"><span>Gastado con presupuesto</span><strong>${formatMoney(totalSpent)}</strong><span style="margin-top:5px">${totalBudget ? `${formatMoney(Math.abs(remaining))} ${remaining >= 0 ? 'disponibles' : 'por encima'}` : 'Define tus límites'}</span></div></article>
+    ${unbudgeted > 0 ? `<p class="plan-context">Gastos sin presupuesto: <strong>${formatMoney(unbudgeted)}</strong></p>` : ''}
     <div class="budget-cards">${allCats.map((category, index) => {
       const amount = Number(budgets[category] || 0);
       const used = spent[category] || 0;
       const ratio = percent(used, amount);
-      return `<article class="budget-card"><div class="budget-card-head"><span class="budget-card-title"><span class="category-dot" style="background:${CATEGORY_COLORS[index % CATEGORY_COLORS.length]}"></span>${escapeHTML(category)}</span><button class="budget-edit" data-action="edit-budget" data-category="${escapeHTML(category)}" aria-label="Editar presupuesto de ${escapeHTML(category)}">${svg('edit')}</button></div><div class="budget-card-value">${amount ? `${formatMoney(used)} de ${formatMoney(amount)}` : 'Sin límite definido'}</div><div class="progress" style="margin-top:10px"><div class="progress-fill ${progressClass(used, amount)}" style="width:${ratio}%"></div></div><div class="budget-card-foot"><span>${amount ? `${ratio}% utilizado` : `${formatMoney(used)} registrados`}</span><button class="text-button" data-action="edit-budget" data-category="${escapeHTML(category)}">${amount ? 'Cambiar' : 'Definir'}</button></div></article>`;
+      return `<article class="budget-card"><div class="budget-card-head"><span class="budget-card-title"><span class="category-dot" style="background:${CATEGORY_COLORS[index % CATEGORY_COLORS.length]}"></span>${escapeHTML(category)}</span><button class="budget-edit" data-action="edit-budget" data-category="${escapeHTML(category)}" aria-label="Editar presupuesto de ${escapeHTML(category)}">${svg('edit')}</button></div><div class="budget-card-value">${amount ? `${formatMoney(used)} de ${formatMoney(amount)}` : 'Sin límite definido'}</div><div class="progress" style="margin-top:10px"><div class="progress-fill ${progressClass(used, amount)}" style="width:${Math.min(100, ratio)}%"></div></div><div class="budget-card-foot"><span>${amount ? `${ratio}% utilizado` : `${formatMoney(used)} registrados`}</span><button class="text-button" data-action="edit-budget" data-category="${escapeHTML(category)}">${amount ? 'Cambiar' : 'Definir'}</button></div></article>`;
     }).join('')}</div>`;
 }
 
@@ -506,8 +510,17 @@ function cloudStatusLabel() {
   })[cloudStatus];
 }
 
+function lastCloudSaveLabel() {
+  const date = new Date(cloudSavedAt);
+  if (!cloudSavedAt || !Number.isFinite(date.valueOf())) return 'Aún no hay cambios guardados en la nube.';
+  return 'Último guardado en la nube: ' + new Intl.DateTimeFormat('es-CO', {
+    dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Bogota',
+  }).format(date);
+}
+
 function updateCloudStatus() {
   root.querySelectorAll('[data-cloud-status]').forEach(item => { item.textContent = cloudStatusLabel(); });
+  root.querySelectorAll('[data-cloud-saved-at]').forEach(item => { item.textContent = lastCloudSaveLabel(); });
 }
 
 const authViews = {
@@ -515,7 +528,6 @@ const authViews = {
   signup: ['Crea tu cuenta', 'Confirma tu correo para sincronizar tus movimientos.', 'Crear cuenta'],
   recovery: ['Recupera tu cuenta', 'Te enviaremos un enlace a tu correo.', 'Enviar enlace'],
   'new-password': ['Elige una contraseña nueva', 'Usa al menos 8 caracteres.', 'Guardar contraseña'],
-  admin: ['Acceso de administrador', 'Entra con tu cuenta de Saldo. El panel solicita un segundo factor.', 'Continuar'],
 };
 
 function renderAuth() {
@@ -547,7 +559,7 @@ function renderAuth() {
       <h2 id="auth-title">${title}</h2><p>${description}</p>
       ${authForm}
       <div class="auth-actions">
-        ${changing || authBooting ? '' : authMode === 'signin' ? '<button class="secondary-button" data-action="guest">Usar en este dispositivo</button><button class="text-button" data-action="auth-mode" data-mode="admin">Acceso de administrador</button>' : authMode === 'signup' ? '' : '<button class="text-button" data-action="auth-mode" data-mode="signin">Volver al inicio de sesión</button>'}
+        ${changing || authBooting ? '' : authMode === 'signin' ? '<button class="secondary-button" data-action="guest">Usar en este dispositivo</button>' : authMode === 'signup' ? '' : '<button class="text-button" data-action="auth-mode" data-mode="signin">Volver al inicio de sesión</button>'}
         ${changing ? '<button class="text-button" data-action="sign-out">Cancelar y cerrar sesión</button>' : ''}
       </div>
       <footer class="auth-footer"><a class="text-button" href="./privacy.html">Privacidad</a></footer>
@@ -580,19 +592,72 @@ async function openAdmin() {
   } else if (access.allowed) {
     const { data } = await supabaseClient.auth.mfa.listFactors();
     if (activeTab !== 'admin' || !authUser) return;
-    adminFactor = data?.totp.find(factor => factor.status === 'verified') || null;
+    adminFactor = data?.totp?.find(factor => factor.status === 'verified') || null;
   }
   render();
 }
 
-async function enrollAdminFactor() {
-  if (!adminStatus?.allowed || adminFactor) return;
-  const { data, error } = await supabaseClient.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Saldo', issuer: 'Saldo' });
-  if (activeTab !== 'admin' || !authUser) return;
-  if (error || !data?.totp) { toast('No pudimos preparar la verificación. Intenta de nuevo.', 'error'); return; }
-  adminFactor = { id: data.id, secret: data.totp.secret };
-  render();
-  root.querySelector('#admin-code')?.focus();
+function ownerQrSource(value) {
+  if (typeof value !== 'string' || value.length > 150000) return '';
+  if (value.startsWith('data:image/svg+xml;') || value.startsWith('data:image/svg+xml,')) return value;
+  if (/^<svg[\s>]/.test(value.trim())) return 'data:image/svg+xml,' + encodeURIComponent(value);
+  return '';
+}
+
+async function enrollAdminFactor(button) {
+  if (!authUser || !adminStatus?.allowed || adminFactor || button.disabled) return;
+  const ownerId = authUser.id;
+  button.disabled = true;
+  try {
+    const factors = await supabaseClient.auth.mfa.listFactors();
+    if (activeTab !== 'admin' || authUser?.id !== ownerId) return;
+    if (factors.error) throw factors.error;
+    const existing = factors.data?.totp?.find(factor => factor.status === 'verified');
+    if (existing) { adminFactor = existing; render(); return; }
+
+    // If setup was abandoned before confirmation, replace only Saldo's unused factor.
+    const abandoned = factors.data?.all?.find(factor => factor.factor_type === 'totp'
+      && factor.status === 'unverified' && factor.friendly_name === 'Saldo');
+    if (abandoned) {
+      const removed = await supabaseClient.auth.mfa.unenroll({ factorId: abandoned.id });
+      if (removed.error) throw removed.error;
+    }
+    const { data, error } = await supabaseClient.auth.mfa.enroll({
+      factorType: 'totp', friendlyName: 'Saldo', issuer: 'Saldo',
+    });
+    if (activeTab !== 'admin' || authUser?.id !== ownerId) return;
+    if (error || !data?.totp?.secret) throw error || new Error('Falta la clave del autenticador');
+    adminFactor = { id: data.id, secret: data.totp.secret, qr: ownerQrSource(data.totp.qr_code) };
+    render();
+  } catch {
+    toast('No pudimos preparar la verificación. Revisa tu conexión e inténtalo otra vez.', 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function copyOwnerKey() {
+  if (!adminStatus?.allowed || !adminFactor?.secret || activeTab !== 'admin') return;
+  try {
+    await navigator.clipboard.writeText(adminFactor.secret);
+    toast('Clave copiada. Pégala en tu app de códigos.');
+  } catch {
+    const key = root.querySelector('#owner-secret');
+    key?.focus();
+    key?.select();
+    toast('Seleccioné la clave para que puedas copiarla.', 'info');
+  }
+}
+
+function renderOwnerSetup() {
+  const qr = adminFactor.qr
+    ? `<article class="owner-method"><h3>Saldo abierto en el portátil</h3><p>En tu teléfono, abre la app de códigos, toca <strong>+</strong> y elige escanear un código QR. Apunta la cámara a esta imagen.</p><img class="owner-qr" src="${escapeHTML(adminFactor.qr)}" alt="Código QR para vincular Saldo" width="180" height="180" /></article>`
+    : '';
+  return `<div class="owner-methods">${qr}<article class="owner-method">
+    <h3>Todo desde el mismo teléfono</h3>
+    <p>Usa una app de códigos como Google Authenticator. En esa app, toca <strong>+</strong> y elige <strong>Introducir clave de configuración</strong>. Ponle el nombre <strong>Saldo</strong> y pega esta clave. Si te pregunta el tipo, elige <strong>Basado en tiempo</strong>.</p>
+    <details><summary>Ver y copiar la clave</summary><div class="field"><label for="owner-secret">Clave de configuración</label><input id="owner-secret" type="text" value="${escapeHTML(adminFactor.secret)}" readonly autocomplete="off" spellcheck="false" /></div><button class="secondary-button" data-action="admin-copy">Copiar clave</button></details>
+    </article></div><p>Cuando tu app de códigos muestre seis dígitos junto a Saldo, escríbelos abajo.</p>`;
 }
 
 async function verifyAdminCode(form) {
@@ -611,10 +676,10 @@ function renderAdmin() {
   if (adminStatus?.unavailable) content = '<p>No pudimos consultar permisos. Vuelve a entrar para reintentar.</p>';
   else if (adminStatus && !adminStatus.allowed) content = '<p>Esta cuenta no tiene acceso al panel administrativo.</p>';
   else if (adminStatus?.allowed && !adminStatus.verified) {
-    const enroll = adminFactor?.secret ? `<p>En tu aplicación de autenticación, agrega una cuenta manual e ingresa esta clave:</p><p><code>${escapeHTML(adminFactor.secret)}</code></p>` : '';
+    const enroll = adminFactor?.secret ? renderOwnerSetup() : '<p>Abre tu app de códigos y busca Saldo. Escribe el código vigente de seis dígitos.</p>';
     content = adminFactor
       ? `${enroll}<form id="admin-code-form"><div class="field"><label for="admin-code">Código de seis dígitos</label><input id="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required /></div><div class="account-actions"><button class="primary-button" type="submit">Verificar código</button></div></form>`
-      : '<p>Activa la verificación en dos pasos para entrar al panel.</p><button class="secondary-button" data-action="admin-enroll">Vincular autenticador</button>';
+      : '<p>El panel pide un código adicional. Una app de autenticación, como Google Authenticator, genera ese código en tu teléfono. Vincúlala una sola vez.</p><button class="primary-button" data-action="admin-enroll">Vincular autenticador</button>';
   } else if (adminSummary?.unavailable) content = '<p>No pudimos cargar los indicadores.</p>';
   else if (adminSummary) {
     content = `<div class="report-kpis">
@@ -623,7 +688,7 @@ function renderAdmin() {
       <article class="report-kpi"><span>Dispositivos con push</span><strong>${Number(adminSummary.push_devices) || 0}</strong></article>
     </div>`;
   }
-  return `<section class="panel panel-pad"><div class="section-heading"><div><h2>Panel de administración</h2><p>Indicadores generales de Saldo</p></div></div>
+  return `<section class="panel panel-pad"><div class="section-heading"><div><h2>Panel del dueño</h2><p>Indicadores generales de Saldo</p></div></div>
     ${content}<div class="account-actions"><button class="text-button" data-action="admin-return">Volver a Cuenta</button></div></section>`;
 }
 
@@ -639,13 +704,13 @@ function renderAccount() {
     : 'Recibe avisos aunque Saldo esté cerrada.';
   const statusLabel = cloudStatusLabel();
   const local = readState(STORE_KEY);
-  const hasLocalRecords = local.transactions.length || Object.keys(local.budgets).length || local.profile.name;
+  const hasLocalRecords = local.transactions.length || ['budgets','wallets','transfers','recurring','goals'].some(key => Object.keys(local[key]).length) || local.profile.name;
   const authPanel = authUser
-    ? `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Abre esta cuenta en tus dispositivos para ver tus movimientos.</p><div class="cloud-account"><span class="avatar">${svg('user')}</span><span><strong>${escapeHTML(authUser.email || 'Cuenta Saldo')}</strong><small data-cloud-status>${statusLabel}</small></span></div><div class="account-actions"><button class="secondary-button" data-action="sync-now">Sincronizar ahora</button><button class="secondary-button" data-action="sign-out">Cerrar sesión</button>${adminStatus?.allowed ? '<button class="secondary-button" data-action="admin-open">Administración</button>' : ''}${hasLocalRecords ? '<button class="text-button" data-action="import-local">Importar datos de invitado</button>' : ''}</div></section>`
+    ? `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Abre esta cuenta en tus dispositivos para ver tus movimientos.</p><div class="cloud-account"><span class="avatar">${svg('user')}</span><span><strong>${escapeHTML(authUser.email || 'Cuenta Saldo')}</strong><small data-cloud-status>${statusLabel}</small><small data-cloud-saved-at>${escapeHTML(lastCloudSaveLabel())}</small></span></div><div class="account-actions"><button class="secondary-button" data-action="sync-now">Sincronizar ahora</button><button class="secondary-button" data-action="sign-out">Cerrar sesión</button>${adminStatus?.allowed ? '<button class="secondary-button" data-action="admin-open">Panel del dueño</button>' : ''}${hasLocalRecords ? '<button class="text-button" data-action="import-local">Importar datos de invitado</button>' : ''}</div></section>`
     : `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Inicia sesión para guardar una copia en la nube y sincronizar tus dispositivos.</p><div class="account-actions"><button class="primary-button" data-action="auth-mode" data-mode="signin">Iniciar sesión</button><button class="secondary-button" data-action="auth-mode" data-mode="signup">Crear cuenta</button></div></section>`;
   const privacyTitle = authUser ? 'Tus datos están vinculados a tu cuenta' : 'Tus movimientos permanecen en este navegador';
   const privacyCopy = authUser ? 'Saldo conserva una copia local y sincroniza tus registros con tu cuenta autenticada. Puedes cerrar sesión para ocultarlos en este dispositivo.' : 'Al iniciar sesión, podrás recuperar tus datos en otro dispositivo. Sin cuenta, usa la copia de seguridad antes de cambiar de teléfono.';
-  return `<div class="page-title-row"><div><h2>Tu cuenta y preferencias</h2><p>Configura tu perfil, tus avisos y tus copias de seguridad.</p></div><span class="local-badge">${svg('lock')} ${authUser ? statusLabel : 'Perfil local'}</span></div>
+  return `<div class="page-title-row"><div><h2>Tu cuenta y preferencias</h2><p>Configura tu perfil, tus avisos y tus copias de seguridad.</p></div><span class="local-badge">${svg('lock')} <span ${authUser ? 'data-cloud-status' : ''}>${authUser ? statusLabel : 'Perfil local'}</span></span></div>
     <div class="profile-layout"><div class="panel">
       ${authPanel}
       <section class="form-section"><h3>Mi perfil</h3><p>El nombre solo se usa para personalizar el saludo en este dispositivo.</p><form id="profile-form"><div class="form-grid"><div class="field full"><label for="profile-name">¿Cómo te llamamos?</label><input id="profile-name" name="name" maxlength="48" value="${escapeHTML(name)}" placeholder="Tu nombre" autocomplete="name" /></div><div class="field"><label>Moneda</label><input value="Peso colombiano (COP)" disabled aria-label="Moneda peso colombiano" /></div><div class="field"><label>Registros guardados</label><input value="${state.transactions.length}" disabled aria-label="Cantidad de movimientos" /></div></div><div class="form-actions"><button class="primary-button" type="submit">Guardar perfil</button></div></form></section>
@@ -656,7 +721,13 @@ function renderAccount() {
         <div class="reminder-controls"><label>Día del mes<select name="reminder-day" id="reminder-day">${Array.from({ length: 28 }, (_, i) => i + 1).map(day => `<option value="${day}" ${String(day) === String(state.settings.reminderDay) ? 'selected' : ''}>${day}</option>`).join('')}</select></label><label>Hora aproximada<input id="reminder-time" required type="time" value="${escapeHTML(state.settings.reminderTime)}" /></label></div>
         <div class="account-actions"><button class="secondary-button" data-action="test-notification">${svg('bell')} Enviar aviso de prueba</button></div>
       </section>
-      <section class="form-section"><h3>Guardar o trasladar tus datos</h3><p>Descarga una copia antes de cambiar de teléfono o limpiar el navegador.</p><div class="account-actions"><button class="secondary-button" data-action="export-json">${svg('download')} Descargar copia</button><button class="secondary-button" data-action="import-json">Importar copia</button><input hidden id="import-file" type="file" accept="application/json,.json" /></div><div class="account-actions"><button class="danger-button" data-action="clear-data">Borrar todos mis datos</button></div></section>
+      <section class="form-section">
+        <details class="account-details" id="data-panel" ${dataPanelOpen ? 'open' : ''}>
+          <summary>Datos y copias</summary><p>Descarga una copia de tus movimientos, bolsillos, metas y recurrentes.</p>
+          <div class="account-actions"><button class="secondary-button" data-action="export-json">${svg('download')} Descargar copia</button><button class="secondary-button" data-action="import-json">Restaurar copia</button><input hidden id="import-file" type="file" accept="application/json,.json" /></div>
+          <details class="account-details account-delete" id="delete-panel" ${deletePanelOpen ? 'open' : ''}><summary>Borrar datos</summary><p>Vacía los datos de Saldo. Tu cuenta de acceso se conserva.</p><button class="danger-button" data-action="clear-data">Borrar todos mis datos</button></details>
+        </details>
+      </section>
     </div>
     <aside class="panel panel-pad"><div class="section-heading"><div><h2>Privacidad y conexión</h2><p>Tu información se usa solo para las funciones de Saldo.</p></div></div><div class="muted-panel"><strong>${svg('shield')} ${privacyTitle}</strong><p>${privacyCopy} Saldo no lee tus cuentas bancarias ni procesa pagos.</p></div><div class="setting-row"><div><strong>Sincronización</strong><small>${authUser ? 'Tus movimientos, presupuestos y preferencias se sincronizan al iniciar sesión.' : 'Los datos permanecen locales hasta que inicies sesión.'}</small></div></div><div class="setting-row"><div><strong>Avisos con la app cerrada</strong><small>${pushEnabled ? 'Push está activado para este dispositivo.' : 'El permiso del teléfono se solicita al activar push.'}</small></div></div><div class="account-actions"><a class="text-button" href="./privacy.html">Política de privacidad</a><button class="text-button" data-action="install-help">Cómo instalar en mi teléfono</button></div></aside></div>`;
 }
@@ -664,6 +735,7 @@ function renderAccount() {
 function renderModal() {
   if (modal.type === 'budget') return renderBudgetModal();
   if (modal.type === 'transaction') return renderTransactionModal();
+  if (modal.type === 'planning') return renderToolModal();
   return '';
 }
 
@@ -672,9 +744,10 @@ function renderTransactionModal() {
   const type = modal.draftType || existing?.type || 'expense';
   const categories = CATEGORIES[type];
   const category = modal.category || existing?.category || categories[0];
+  const walletField = Object.keys(state.wallets).length ? toolSelect('tx-wallet', 'walletId', 'Bolsillo', walletOptions(modal.walletId || existing?.walletId)) : '';
   return `<div class="modal-backdrop" data-action="backdrop-close"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-header"><div><h2 id="modal-title">${existing ? 'Editar movimiento' : 'Nuevo movimiento'}</h2><p>Registra una entrada o salida de dinero.</p></div><button class="icon-button" data-action="close-modal" aria-label="Cerrar">${svg('close')}</button></div><div class="modal-body">
     <div class="type-switch"><button class="type-choice ${type === 'income' ? 'active income' : ''}" data-action="set-type" data-type="income">Ingreso</button><button class="type-choice ${type === 'expense' ? 'active expense' : ''}" data-action="set-type" data-type="expense">Gasto</button></div>
-    <form id="transaction-form" class="modal-form"><input type="hidden" name="type" value="${type}"/><div class="field field-amount"><label for="tx-amount">Valor en pesos</label><input id="tx-amount" name="amount" type="number" inputmode="decimal" min="1" step="1" required autofocus value="${existing ? Number(existing.amount) : ''}" placeholder="0" /></div><div class="field"><label for="tx-title">Concepto</label><input id="tx-title" name="title" maxlength="80" required value="${escapeHTML(existing?.title || '')}" placeholder="Ej. Mercado, salario…" /></div><div class="form-grid"><div class="field"><label for="tx-category">Categoría</label><select id="tx-category" name="category">${categories.map(item => `<option ${item === category ? 'selected' : ''}>${escapeHTML(item)}</option>`).join('')}</select></div><div class="field"><label for="tx-date">Fecha</label><input id="tx-date" name="date" type="date" required value="${escapeHTML(existing?.date || todayString())}" /></div></div><div class="field"><label for="tx-note">Nota <span class="field-help">(opcional)</span></label><input id="tx-note" name="note" maxlength="120" value="${escapeHTML(existing?.note || '')}" placeholder="Añade un detalle" /></div><div class="modal-form-actions">${existing ? `<button class="danger-button" type="button" data-action="delete-transaction" data-id="${escapeHTML(existing.id)}">Eliminar</button>` : ''}<button class="secondary-button" type="button" data-action="close-modal">Cancelar</button><button class="primary-button" type="submit">${existing ? 'Guardar cambios' : 'Guardar movimiento'}</button></div></form>
+    <form id="transaction-form" class="modal-form"><input type="hidden" name="type" value="${type}"/><div class="field field-amount"><label for="tx-amount">Valor en pesos</label><input id="tx-amount" name="amount" type="number" inputmode="decimal" min="1" step="1" required autofocus value="${escapeHTML(modal.fields?.amount ?? existing?.amount ?? '')}" placeholder="0" /></div><div class="field"><label for="tx-title">Concepto</label><input id="tx-title" name="title" maxlength="80" required value="${escapeHTML(modal.fields?.title ?? existing?.title ?? '')}" placeholder="Ej. Mercado, salario…" /></div><div class="form-grid"><div class="field"><label for="tx-category">Categoría</label><select id="tx-category" name="category">${categories.map(item => `<option ${item === category ? 'selected' : ''}>${escapeHTML(item)}</option>`).join('')}</select></div><div class="field"><label for="tx-date">Fecha</label><input id="tx-date" name="date" type="date" required value="${escapeHTML(modal.fields?.date || existing?.date || todayString())}" /></div></div><div class="field"><label for="tx-note">Nota <span class="field-help">(opcional)</span></label><input id="tx-note" name="note" maxlength="120" value="${escapeHTML(modal.fields?.note ?? existing?.note ?? '')}" placeholder="Añade un detalle" /></div>${walletField}<div class="modal-form-actions">${existing ? `<button class="danger-button" type="button" data-action="delete-transaction" data-id="${escapeHTML(existing.id)}">Eliminar</button>` : ''}<button class="secondary-button" type="button" data-action="close-modal">Cancelar</button><button class="primary-button" type="submit">${existing ? 'Guardar cambios' : 'Guardar movimiento'}</button></div></form>
     </div></section></div>`;
 }
 
@@ -724,6 +797,8 @@ function saveTransaction(form) {
   const id = modal.id || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const tx = { id, type, amount: Math.round(amount), title: String(data.get('title') || '').trim(), category: String(data.get('category') || ''), date: String(data.get('date') || todayString()), note: String(data.get('note') || '').trim() };
   if (!tx.title || !validDate(tx.date) || !CATEGORIES[type].includes(tx.category)) return toast('Revisa el concepto, la fecha y la categoría.', 'error');
+  const walletId = String(data.get('walletId') || 'general');
+  if (Object.hasOwn(state.wallets, walletId)) tx.walletId = walletId;
   const exists = state.transactions.some(item => item.id === id);
   state.transactions = exists ? state.transactions.map(item => item.id === id ? tx : item) : [...state.transactions, tx];
   const month = tx.date.slice(0, 7);
@@ -940,7 +1015,6 @@ async function submitAuthForm(form) {
     const { data: result, error } = await supabaseClient.auth.signInWithPassword({ email, password });
     if (error) throw error;
     handleSignedIn(result.user);
-    if (mode === 'admin') void openAdmin();
 
   } catch (error) {
     const message = ({
@@ -1036,10 +1110,14 @@ function importJSON(file) {
 }
 
 function handleAction(button) {
+  if (handlePlanningAction(button)) return;
   const action = button.dataset.action;
   if (action === 'new-transaction') openTransaction();
   if (action === 'close-modal') { modal = null; render(); }
   if (action === 'set-type' && modal?.type === 'transaction') {
+    modal.walletId = root.querySelector('#tx-wallet')?.value || 'general';
+    const draft = new FormData(root.querySelector('#transaction-form'));
+    modal.fields = Object.fromEntries(draft);
     modal.draftType = button.dataset.type;
     modal.category = CATEGORIES[modal.draftType][0];
     render();
@@ -1080,8 +1158,9 @@ function handleAction(button) {
     persist(); render(); toast('Se copiaron los datos de invitado a tu cuenta.');
   }
   if (action === 'admin-open') void openAdmin();
-  if (action === 'admin-enroll') void enrollAdminFactor();
-  if (action === 'admin-return') { activeTab = 'account'; render(); }
+  if (action === 'admin-enroll') void enrollAdminFactor(button);
+  if (action === 'admin-copy') void copyOwnerKey();
+  if (action === 'admin-return') { adminFactor = adminSummary = null; activeTab = 'account'; render(); }
 
   if (action === 'sign-out') void signOutOfAccount();
   if (action === 'toggle-reminders') {
@@ -1139,7 +1218,9 @@ function installApp() {
 root.addEventListener('click', event => {
   const tab = event.target.closest('[data-tab]');
   if (tab) {
-    if (activeTab !== tab.dataset.tab) {
+    if (activeTab !== tab.dataset.tab || (tab.dataset.tab === 'budgets' && plannerView !== 'budgets')) {
+      if (activeTab === 'admin') adminFactor = adminSummary = null;
+      if (tab.dataset.tab === 'budgets') plannerView = 'budgets';
       activeTab = tab.dataset.tab; render(); window.scrollTo(0, 0);
       if (activeTab === 'account' && !pushPublicKey) void preparePushForDevice();
     }
@@ -1155,6 +1236,7 @@ root.addEventListener('click', event => {
 root.addEventListener('submit', event => {
   if (event.target.id === 'auth-form') { event.preventDefault(); void submitAuthForm(event.target); }
   if (event.target.id === 'admin-code-form') { event.preventDefault(); void verifyAdminCode(event.target); }
+  if (event.target.id === 'plan-form') { event.preventDefault(); saveToolForm(event.target); }
   if (event.target.id === 'transaction-form') { event.preventDefault(); saveTransaction(event.target); }
   if (event.target.id === 'budget-form') {
     event.preventDefault();
@@ -1185,7 +1267,14 @@ root.addEventListener('input', event => {
   }
 });
 
+root.addEventListener('toggle', event => {
+  if (event.target.id === 'data-panel') dataPanelOpen = event.target.open;
+  if (event.target.id === 'delete-panel') deletePanelOpen = event.target.open;
+}, true);
+
 root.addEventListener('change', event => {
+  if (event.target.id === 'recurring-type') root.querySelector('#recurring-category').innerHTML = categoryOptions(event.target.value);
+
   if (event.target.id === 'tx-category' && modal?.type === 'transaction') modal.category = event.target.value;
   if (event.target.id === 'reminder-day') { state.settings.reminderDay = event.target.value; persist(); }
   if (event.target.id === 'reminder-time' && event.target.value) { state.settings.reminderTime = event.target.value; persist(); }

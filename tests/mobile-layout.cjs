@@ -108,9 +108,7 @@ async function inspectScreen(browser, origin, [name, width, height]) {
     await auth.locator('[data-mode="recovery"]').click();
     check(label, 'recuperación solo pide correo', await auth.getByLabel('Correo electrónico').isVisible() && !await auth.getByLabel('Contraseña', { exact: true }).count());
     await auth.locator('[data-mode="signin"]').click();
-    await auth.locator('[data-mode="admin"]').click();
-    check(label, 'permite abrir acceso de administrador', await auth.getByRole('heading', { name: 'Acceso de administrador' }).isVisible());
-    await auth.locator('[data-mode="signin"]').click();
+    check(label, 'el acceso público no muestra el panel del dueño', !await auth.getByText('Panel del dueño').count() && !await auth.locator('[data-mode="admin"]').count());
     check(label, 'permite entrar en modo local', await guest.isVisible());
     if (process.env.SALDO_QA_SCREENSHOTS && width === 390) await page.screenshot({ path: path.join(process.env.SALDO_QA_SCREENSHOTS, 'saldo-acceso.png'), fullPage: true });
     await guest.click();

@@ -15,12 +15,14 @@ const messages = {
   budget_80: { title: "Saldo · Presupuesto", body: "Te acercas al límite de un presupuesto. Abre Saldo para revisarlo." },
   budget_100: { title: "Saldo · Presupuesto", body: "Alcanzaste el límite de un presupuesto. Abre Saldo para revisarlo." },
   monthly: { title: "Saldo · Recordatorio", body: "Tómate un momento para revisar tus movimientos y presupuestos." },
+  recurring: { title: "Saldo · Próximos movimientos", body: "Tienes movimientos programados por revisar. Abre Saldo para verlos." },
 } as const;
 
 type UserKind = "configuration" | "test" | "budget_80" | "budget_100";
 type Kind = keyof typeof messages;
 type PushRow = { endpoint: string; p256dh: string; auth: string };
 type Reminder = { user_id: string; reminder_month: string; attempt_count: number };
+type RecurringReminder = { user_id: string; recurring_id: string; occurrence_date: string; attempt_count: number };
 type VaultVapidRow = { public_key: string; private_key: string };
 type VapidDetails = { subject: string; publicKey: string; privateKey: string };
 type Admin = ReturnType<typeof makeAdmin>;
@@ -208,20 +210,55 @@ async function deliverReminder(admin: Admin, reminder: Reminder, vapid: VapidDet
   return result.sent;
 }
 
-async function dispatchMonthlyReminders(admin: Admin, vapid: VapidDetails) {
-  const { data, error } = await admin.rpc("saldo_claim_due_push_reminders", { p_limit: reminderBatchSize });
-  if (error) throw new Error("No se pudieron reservar recordatorios.");
-  const reminders = (data || []) as Reminder[];
+async function deliverReminderBatches<T>(groups: T[], deliver: (group: T) => Promise<number>) {
   let sent = 0;
-  for (let start = 0; start < reminders.length; start += reminderConcurrency) {
-    const batch = reminders.slice(start, start + reminderConcurrency);
-    const results = await Promise.allSettled(batch.map((reminder) => deliverReminder(admin, reminder, vapid)));
+  for (let start = 0; start < groups.length; start += reminderConcurrency) {
+    const batch = groups.slice(start, start + reminderConcurrency);
+    const results = await Promise.allSettled(batch.map(deliver));
     for (const result of results) {
       if (result.status === "fulfilled") sent += result.value;
       else console.error("No se pudo entregar un recordatorio.");
     }
   }
   return sent;
+}
+
+async function dispatchMonthlyReminders(admin: Admin, vapid: VapidDetails) {
+  const { data, error } = await admin.rpc("saldo_claim_due_push_reminders", { p_limit: reminderBatchSize });
+  if (error) throw new Error("No se pudieron reservar recordatorios mensuales.");
+  return deliverReminderBatches((data || []) as Reminder[], (reminder) => deliverReminder(admin, reminder, vapid));
+}
+
+async function deliverRecurringReminders(admin: Admin, claims: RecurringReminder[], vapid: VapidDetails) {
+  const userId = claims[0].user_id;
+  const result = await deliverToUser(admin, userId, "recurring", vapid);
+  if (result.sent || !result.transientFailures) {
+    const completedAt = new Date().toISOString();
+    await Promise.all(claims.map(async (claim) => {
+      const { error } = await admin.from("push_recurring_dispatches")
+        .update({ completed_at: completedAt })
+        .eq("user_id", userId).eq("recurring_id", claim.recurring_id)
+        .eq("occurrence_date", claim.occurrence_date).eq("attempt_count", claim.attempt_count);
+      if (error) console.error("No se pudo marcar un aviso de próximos movimientos como completado.");
+    }));
+  }
+  return result.sent;
+}
+
+async function dispatchRecurringReminders(admin: Admin, vapid: VapidDetails) {
+  const { data, error } = await admin.rpc("saldo_claim_due_recurring_reminders", { p_limit: reminderBatchSize });
+  if (error) throw new Error("No se pudieron reservar avisos de próximos movimientos.");
+
+  const byUser = new Map<string, RecurringReminder[]>();
+  for (const claim of (data || []) as RecurringReminder[]) {
+    let claims = byUser.get(claim.user_id);
+    if (!claims) {
+      claims = [];
+      byUser.set(claim.user_id, claims);
+    }
+    claims.push(claim);
+  }
+  return deliverReminderBatches([...byUser.values()], (claims) => deliverRecurringReminders(admin, claims, vapid));
 }
 
 Deno.serve(async (request) => {
@@ -240,7 +277,15 @@ Deno.serve(async (request) => {
       if (typeof expected !== "string" || !matchesCronSecret(cronToken, expected)) {
         return reply({ error: "Credencial inválida." }, 401, origin);
       }
-      const sent = await dispatchMonthlyReminders(admin, await getVapidDetails(admin));
+      const vapid = await getVapidDetails(admin);
+      const results = await Promise.allSettled([
+        dispatchMonthlyReminders(admin, vapid),
+        dispatchRecurringReminders(admin, vapid),
+      ]);
+      const sent = results.reduce((count, result) => count + (result.status === "fulfilled" ? result.value : 0), 0);
+      if (results.some((result) => result.status === "rejected")) {
+        return reply({ error: "Una tarea de recordatorios no respondió.", sent }, 503, origin);
+      }
       return reply({ ok: true, sent }, 200, origin);
     }
 

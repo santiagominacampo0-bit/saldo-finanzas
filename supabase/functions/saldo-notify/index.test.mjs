@@ -43,6 +43,10 @@ globalThis.testSupabase = {
     }
     if (name === "saldo_claim_push_quota") return { data: scenario.quota };
     if (name === "saldo_claim_due_push_reminders") return { data: scenario.reminders };
+    if (name === "saldo_claim_due_recurring_reminders") {
+      if (scenario.recurringError) return { error: { message: "simulated database failure" } };
+      return { data: scenario.recurringReminders };
+    }
     throw new Error("RPC desconocido " + name);
   },
   from(table) {
@@ -66,8 +70,8 @@ globalThis.testSupabase = {
         return {};
       },
       update(values) {
-        assert.equal(table, "push_reminder_dispatches");
-        scenario.completed.push({ values, filters });
+        assert.ok(["push_reminder_dispatches", "push_recurring_dispatches"].includes(table));
+        scenario.completed.push({ table, values, filters });
         return this;
       },
     };
@@ -114,6 +118,8 @@ beforeEach(async () => {
     rows: [],
     quota: true,
     reminders: [],
+    recurringReminders: [],
+    recurringError: false,
     completed: [],
     providerStatus: 201,
     vaultPair,
@@ -179,6 +185,7 @@ test("rejects malformed, oversized, non-JSON, and unauthorized reminder payloads
   const requests = [
     request({ body: "{" }),
     request({ body: '{"kind":"monthly"}' }),
+    request({ body: '{"kind":"recurring"}' }),
     request({ body: '{"kind":"test","data":"' + "a".repeat(600) + '"}' }),
     request({ body: '{"kind":"test"}', type: "text/plain" }),
   ];
@@ -291,8 +298,53 @@ test("restricts cron access and dispatches only claimed accounts", async () => {
     { name: "saldo_get_cron_token", params: undefined },
     { name: "saldo_get_or_initialize_vapid", params: undefined },
     { name: "saldo_claim_due_push_reminders", params: { p_limit: 24 } },
+    { name: "saldo_claim_due_recurring_reminders", params: { p_limit: 24 } },
   ]);
   assert.deepEqual(scenario.completed[0].filters, {
     user_id: userId, reminder_month: "2026-11", reminder_type: "monthly", attempt_count: 1,
   });
+});
+
+test("groups recurring reminders into one generic notification and completes every claimed occurrence", async () => {
+  const first = { user_id: userId, recurring_id: "test-rent", occurrence_date: "2026-11-20", attempt_count: 1 };
+  const second = { user_id: userId, recurring_id: "test-income", occurrence_date: "2026-11-27", attempt_count: 2 };
+  scenario.recurringReminders = [{ ...first, title: "Private rule title", amount: 987654321 }, second];
+  scenario.rows = [subscription("https://web.push.apple.com/saldo-test")];
+
+  const response = await handler(request({ from: null, token: null, cron: fakeCronSecret }));
+  assert.deepEqual(await response.json(), { ok: true, sent: 1 });
+  assert.equal(scenario.fetches.length, 1);
+  assert.deepEqual(scenario.fetches[0].payload, {
+    title: "Saldo · Próximos movimientos",
+    body: "Tienes movimientos programados por revisar. Abre Saldo para verlos.",
+    tag: "saldo-recurring",
+    url: origin + "/saldo-finanzas/",
+  });
+  assert.deepEqual(scenario.completed.map(({ table, filters }) => ({ table, filters })), [
+    { table: "push_recurring_dispatches", filters: first },
+    { table: "push_recurring_dispatches", filters: second },
+  ]);
+});
+
+test("leaves recurring occurrences available for retry when the provider is temporarily unavailable", async () => {
+  scenario.recurringReminders = [{ user_id: userId, recurring_id: "retry", occurrence_date: "2026-11-20", attempt_count: 1 }];
+  scenario.rows = [subscription("https://web.push.apple.com/saldo-test")];
+  scenario.providerStatus = 503;
+
+  const response = await handler(request({ from: null, token: null, cron: fakeCronSecret }));
+  assert.deepEqual(await response.json(), { ok: true, sent: 0 });
+  assert.equal(scenario.fetches.length, 1);
+  assert.deepEqual(scenario.completed, []);
+});
+
+test("continues monthly delivery and reports failure when recurring claims are unavailable", async () => {
+  scenario.recurringError = true;
+  scenario.reminders = [{ user_id: userId, reminder_month: "2026-11", attempt_count: 1 }];
+  scenario.rows = [subscription("https://web.push.apple.com/saldo-test")];
+
+  const response = await handler(request({ from: null, token: null, cron: fakeCronSecret }));
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "Una tarea de recordatorios no respondió.", sent: 1 });
+  assert.equal(scenario.fetches[0].payload.tag, "saldo-monthly");
+  assert.equal(scenario.completed[0].table, "push_reminder_dispatches");
 });

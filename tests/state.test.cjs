@@ -49,3 +49,38 @@ test('apagar avisos se sincroniza aunque exista otro cambio', () => {
   assert.equal(result.settings.notificationsEnabled, false);
   assert.equal(result.profile.name, 'Perfil');
 });
+
+test('registros anteriores se conservan en General al agregar bolsillos', () => {
+  const tx = transaction('legacy');
+  const result = normalize({ transactions: [tx], wallets: { caja: { id: 'caja', name: 'Efectivo', openingBalance: 200 } } });
+  assert.deepEqual(result.transactions, [tx]);
+  assert.equal(result.wallets.caja.openingBalance, 200);
+});
+test('una referencia a bolsillo inexistente vuelve a General', () => {
+  const tx = transaction('a');
+  assert.deepEqual(normalize({ transactions: [{ ...tx, walletId: 'missing' }] }).transactions, [tx]);
+});
+test('la sincronización combina transferencias, bolsillos y metas nuevos de equipos distintos', () => {
+  const wallet = { id: 'caja', name: 'Efectivo', openingBalance: 1000 };
+  const local = normalize({ wallets: { caja: wallet }, transfers: { t: { id: 't', fromId: 'caja', toId: 'general', amount: 200, date: '2026-11-20' } } });
+  const remote = normalize({ goals: { g: { id: 'g', name: 'Estudio', target: 500, saved: 100 } } });
+  const result = merge(normalize(), local, remote);
+  assert.equal(result.wallets.caja.name, 'Efectivo');
+  assert.equal(result.transfers.t.amount, 200);
+  assert.equal(result.goals.g.saved, 100);
+});
+test('editar un movimiento conserva el bolsillo al combinar los cambios', () => {
+  const wallet = { caja: { id: 'caja', name: 'Efectivo', openingBalance: 0 } };
+  const original = normalize({ wallets: wallet, transactions: [{ ...transaction('a'), walletId: 'caja' }] });
+  const edited = normalize({ wallets: wallet, transactions: [{ ...transaction('a', 800), walletId: 'caja' }] });
+  assert.equal(merge(original, edited, original).transactions[0].walletId, 'caja');
+});
+test('dos confirmaciones de un mismo vencimiento no duplican movimientos', () => {
+  const rule = { id:'rent', title:'Arriendo', nextDue:'2026-11-30', frequency:'monthly', type:'expense', amount:9000, category:'Hogar', active:true };
+  const base = normalize({ recurring: { rent: rule } });
+  const { transaction: tx, next } = require('../saldo-recurrence.js').confirmRecurring(base.recurring.rent);
+  const paid = normalize({ recurring: { rent: next }, transactions: [tx] });
+  const both = merge(base, paid, paid);
+  assert.equal(both.transactions.length, 1);
+  assert.equal(both.recurring.rent.nextDue, '2026-12-30');
+});

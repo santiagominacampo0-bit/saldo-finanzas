@@ -490,3 +490,39 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.planner-nav { margin-bottom: 20px; }
+.planner-nav .filter-chip { min-height: 44px; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); gap: 14px; }
+.plan-card { min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
+.plan-card h3, .owner-method h3 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.plan-card p, .plan-compact small, .owner-method p, .account-details p, .plan-context { margin: 0; color: var(--muted); font-size: .84rem; }
+.plan-card-top { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 10px; }
+.plan-card-top > div { min-width: 0; }
+.plan-card > button { align-self: flex-start; }
+.plan-amount { font-size: clamp(1.15rem, 3vw, 1.62rem); color: var(--green-dark); overflow-wrap: anywhere; }
+.plan-amount small { font-size: .8em; font-weight: 500; }
+.plan-status { border-radius: 100px; background: var(--green-pale); color: var(--green-dark); font-size: .74rem; font-weight: 700; padding: .22rem .56rem; }
+.plan-status.late { background: var(--amber-pale); color: #694616; }
+.plan-empty { grid-column: 1 / -1; }
+.plan-context { margin: 0 0 12px; }
+.plan-compact { list-style: none; margin: 0; padding: 0; }
+.plan-compact > li { padding: 10px 0; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; overflow-wrap: anywhere; }
+.plan-compact > li:last-child { border-bottom: 0; }
+.plan-compact > li > span { min-width: 0; }
+.plan-compact small { display: block; }
+.plan-transfer-value { display: flex; align-items: end; flex-direction: column; text-align: right; }
+.plan-checkbox { display: flex; gap: 8px; align-items: center; color: var(--ink); min-height: 44px; }
+.plan-checkbox input { width: 20px; height: 20px; accent-color: var(--green); }
+.owner-methods { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 16px; margin: 14px 0; }
+.owner-method { display: grid; align-content: start; gap: 10px; padding: 14px; background: var(--surface-soft); border-radius: 16px; min-width: 0; }
+.owner-method summary, .account-details summary { cursor: pointer; min-height: 44px; align-content: center; font-weight: 700; }
+.owner-method button { margin-top: 8px; }
+.owner-qr { display: block; margin-inline: auto; padding: 10px; background: white; width: min(180px,100%); max-width: 100%; height: auto; }
+#admin-code-form { max-width: 360px; }
+.account-delete { margin-top: 16px; padding: 3px 12px 8px; background: var(--red-pale); border-radius: 12px; }
+.account-delete p { margin: 4px 0 10px; }
+@media (max-width: 640px) {
+  .planner-nav { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .plan-card .account-actions { margin-top: 0; }
+}
