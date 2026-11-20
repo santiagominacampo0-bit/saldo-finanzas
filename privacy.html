@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f8f5" />
+    <title>Privacidad — Saldo</title>
+    <link rel="icon" href="./icons/saldo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <style>
+      .privacy-page { max-width: 760px; margin: 0 auto; padding: 34px 20px 70px; }
+      .privacy-page .brand { padding: 0 0 28px; }
+      .privacy-document { padding: 28px; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); }
+      .privacy-document h1 { margin: 0; font: 800 27px var(--display); letter-spacing: -.8px; }
+      .privacy-document .updated { color: var(--muted); font-size: 11px; }
+      .privacy-document h2 { margin: 23px 0 7px; font: 700 15px var(--display); }
+      .privacy-document p, .privacy-document li { color: #59655e; font-size: 12px; line-height: 1.7; }
+      .privacy-document ul { padding-left: 20px; }
+      @media(max-width:520px) { .privacy-page { padding: 22px 13px 50px; } .privacy-document { padding: 20px; } }
+    </style>
+  </head>
+  <body>
+    <main class="privacy-page">
+      <a class="brand" href="./"><span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h17"/><path d="m7 15 4-4 3 2 6-7"/><path d="M16 6h4v4"/></svg></span><span>saldo</span></a>
+      <article class="privacy-document">
+        <p class="updated">Versión de la app: almacenamiento local</p>
+        <h1>Política de privacidad</h1>
+        <p>Saldo ayuda a registrar manualmente ingresos, gastos y presupuestos personales. Esta versión está diseñada para guardar tus registros en el almacenamiento del navegador de tu dispositivo.</p>
+        <h2>Qué información se guarda</h2>
+        <p>El nombre de perfil que escribas, tus movimientos financieros, categorías, presupuestos y preferencias de notificación. Esa información se guarda localmente en el navegador; esta versión no crea una cuenta en la nube, no sincroniza entre dispositivos y no se conecta a bancos ni procesa pagos.</p>
+        <h2>Quién recibe tus datos</h2>
+        <p>Los movimientos y el perfil no se envían al responsable de Saldo. El navegador sí solicita los archivos de la aplicación al servicio que aloja el sitio (por ejemplo, GitHub Pages). Si activas notificaciones, el sistema operativo y el navegador gestionan el permiso y la entrega del aviso. La función de envío push cuando la app está cerrada no está conectada en esta versión.</p>
+        <h2>Copias y eliminación</h2>
+        <p>Puedes exportar una copia JSON desde Cuenta. El archivo queda bajo tu control y puede incluir toda la información financiera ingresada. Importar una copia reemplaza los datos locales actuales. También puedes borrar los datos desde Cuenta o desde los ajustes de almacenamiento de tu navegador.</p>
+        <h2>Limitaciones</h2>
+        <p>Si borras los datos del navegador, desinstalas la app o cambias de dispositivo sin importar una copia, podrías perder tus registros. No incluyas información que no desees guardar en el dispositivo. Si en el futuro se añade inicio de sesión en la nube, sincronización, analítica o conexión bancaria, esta política deberá actualizarse antes de activar esas funciones.</p>
+        <h2>Contacto</h2>
+        <p>El responsable de la publicación deberá añadir aquí un correo de contacto antes de distribuir Saldo públicamente.</p>
+      </article>
+    </main>
+  </body>
+</html>

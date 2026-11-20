@@ -1,0 +1,18 @@
+{
+  "id": "./",
+  "name": "Saldo — Finanzas personales",
+  "short_name": "Saldo",
+  "description": "Control sencillo de ingresos, gastos y presupuestos en pesos colombianos.",
+  "lang": "es-CO",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f7f8f5",
+  "theme_color": "#f7f8f5",
+  "icons": [
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icons/saldo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
