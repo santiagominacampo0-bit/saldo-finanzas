@@ -3,17 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://odveqruhywtrdajuxcts.supabase.co; object-src 'none'; base-uri 'none'; form-action 'self'; upgrade-insecure-requests" />
     <meta name="theme-color" content="#f7f8f5" />
     <meta name="description" content="Organiza tus ingresos, gastos y presupuestos en un solo lugar." />
     <link rel="icon" href="./icons/saldo.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
     <link rel="manifest" href="./manifest.webmanifest" />
-    <link rel="stylesheet" href="./styles.css" />
-    <title>Saldo — tus finanzas, en calma</title>
+    <link rel="stylesheet" href="./styles.css?v=3" />
+    <title>Saldo — tus finanzas en orden</title>
   </head>
   <body>
-    <div id="app" aria-live="polite"></div>
+    <div id="app"></div>
     <noscript>Activa JavaScript para usar Saldo.</noscript>
-    <script src="./app.js" defer></script>
+    <script src="./vendor/supabase.js?v=3" defer></script>
+    <script src="./supabase-config.js?v=3" defer></script>
+    <script src="./saldo-state.js?v=3" defer></script>
+    <script src="./app.js?v=3" defer></script>
   </body>
 </html>

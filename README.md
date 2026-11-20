@@ -1,26 +1,34 @@
 # Saldo
 
-App PWA móvil para registrar ingresos y gastos, fijar presupuestos y consultar reportes en COP. Funciona sin conexión después de la primera carga y guarda los movimientos en el almacenamiento de este dispositivo.
+Saldo organiza ingresos, gastos, presupuestos y reportes mensuales en pesos colombianos. Es una aplicación web instalable con modo de invitado, cuenta de Supabase y exportaciones CSV y JSON.
 
-## Instalar en el teléfono
+## Abrir e instalar
 
-1. Publica el contenido de este repositorio con GitHub Pages usando el workflow incluido.
-2. Abre la URL HTTPS de Pages en Safari (iPhone) o Chrome (Android).
-3. iPhone: **Compartir → Añadir a pantalla de inicio**. Android: usa **Instalar aplicación** cuando aparezca el aviso del navegador.
+- [Abrir Saldo](https://santiagominacampo0-bit.github.io/saldo-finanzas/).
+- Android: en Chrome, abre el menú y elige **Instalar aplicación**. El directorio `android/` también permite compilar un acceso APK que abre el sitio en el navegador del dispositivo.
+- iPhone: en Safari, usa **Compartir → Añadir a pantalla de inicio**.
 
-GitHub Pages entrega la aplicación web instalable; no crea por sí mismo un paquete IPA/APK ni publica en App Store o Play Store.
+## Cuenta y sincronización
 
-## Datos, cuenta y avisos
+El modo de invitado guarda los datos solo en ese navegador. Para sincronizar, crea tu cuenta, confirma el correo e inicia sesión. Desde **Cuenta**, puedes importar los movimientos de invitado con tu autorización. La aplicación guarda los cambios pendientes de conexión por cuenta, comprueba la versión de la fila al escribir y combina cambios de dispositivos distintos. Si dos dispositivos editan el mismo movimiento a la vez, se conserva la última edición sincronizada.
 
-- En esta primera versión, los datos financieros y el perfil permanecen en el almacenamiento local del navegador. No se transmiten a un servidor y no se sincronizan entre dispositivos.
-- El perfil permite personalizar el nombre de saludo; el inicio de sesión y respaldo en la nube requieren conectar un proyecto de autenticación/backend del propietario.
-- Los avisos del navegador funcionan tras conceder permiso. Los avisos por exceso de presupuesto se muestran mientras la app está abierta. Los recordatorios recurrentes se comprueban mientras la app está abierta; el navegador puede suspender una PWA cerrada.
-- El service worker ya recibe eventos `push`, pero el envío push en segundo plano requiere configurar un servidor de notificaciones y guardar las suscripciones. GitHub Pages solo sirve archivos estáticos.
+La app usa una clave publicable. Postgres limita el acceso a las filas mediante RLS. Con la confirmación de correo activa, el proveedor de correo predeterminado de Supabase se limita a los miembros del proyecto. Para registro público y recuperación en otros correos, el titular debe configurar SMTP propio en Supabase. [Documentación de SMTP](https://supabase.com/docs/guides/auth/auth-smtp).
 
-## Desarrollo local
+## Operación
 
-Sirve esta carpeta desde un servidor local (por ejemplo, `python3 -m http.server 4173`) y abre `http://localhost:4173`. Para publicar, sube el contenido de esta carpeta a la raíz de un repositorio y habilita GitHub Actions en **Settings → Pages → Build and deployment → GitHub Actions**.
+1. Aplica las migraciones en `supabase/migrations`, en orden, al proyecto de Supabase. Configura en Auth la URL HTTPS del sitio y sus redirecciones.
+2. Para habilitar una cuenta administrativa ya confirmada, el propietario autoriza su UUID en `saldo_private.admins`. El panel requiere TOTP y únicamente devuelve contadores agregados. El primer registro público nunca concede el rol automáticamente.
+3. Para push instala los cuatro secretos de la función `saldo-notify` en Supabase, despliega con su autenticación de usuario y de cron configurada y guarda `saldo_cron_secret` en Vault. Aplica `supabase/schedule-reminders.sql`. Una vez verificado, establece `pushAvailable: true` en `supabase-config.js` y publica de nuevo. Los secretos privados se mantienen fuera del repositorio.
+4. En GitHub, configura Pages con **GitHub Actions**. El flujo publica únicamente los archivos de la aplicación.
 
-## Privacidad
+Con Saldo abierto, los avisos y el recordatorio de la hora de Colombia pueden verse en la app. Para la entrega con Saldo cerrado, se requiere el servicio push, permiso en cada dispositivo y un navegador compatible. En iPhone/iPad, Web Push requiere iOS/iPadOS 16.4 o posterior y añadir Saldo a la pantalla de inicio. [Requisitos de Web Push](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/).
 
-Saldo no se conecta a bancos ni procesa pagos. Usa registro manual de movimientos. Exporta una copia desde **Cuenta** antes de borrar datos del navegador o cambiar de dispositivo.
+## Desarrollo y pruebas
+
+Usa `python3 -m http.server 4173` en la raíz y abre `http://localhost:4173`.
+
+- `node --test tests/state.test.cjs`.
+- `node --disable-warning=ExperimentalWarning supabase/functions/saldo-notify/index.test.mjs`.
+- `node tests/mobile-layout.cjs` con Playwright Chromium instalado, o define `CHROME_BIN` para usar Chrome. Las pruebas visuales usan datos ficticios.
+
+Lee la [política de privacidad](./privacy.html) antes de activar la sincronización.

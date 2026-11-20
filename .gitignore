@@ -1,0 +1,9 @@
+/.android-build/
+/_site/
+/node_modules/
+*.jks
+*.keystore
+*.apk
+*.aab
+.env
+.env.*

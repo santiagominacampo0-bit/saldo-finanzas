@@ -1,0 +1,4 @@
+project_id = "odveqruhywtrdajuxcts"
+
+[functions.saldo-notify]
+verify_jwt = false

@@ -1,6 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="138" fill="#183e35"/>
-  <circle cx="256" cy="256" r="150" fill="none" stroke="#d5efbd" stroke-width="28"/>
-  <path d="M168 280c20 30 51 45 88 45 47 0 79-24 79-58 0-31-21-45-74-56-43-9-62-18-62-43 0-27 25-45 61-45 29 0 53 10 70 30" fill="none" stroke="#f7f8f5" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M256 95v322" stroke="#d5efbd" stroke-width="22" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="field" x1="0" x2="1" y1="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#28634f"/>
+      <stop offset="1" stop-color="#102e27"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" x2="1" y1="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#edffdb"/>
+      <stop offset="1" stop-color="#bce994"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#field)"/>
+  <path d="M256 96a160 160 0 1 0 160 160" fill="none" stroke="#e4ffcf" stroke-opacity=".23" stroke-width="14" stroke-linecap="round"/>
+  <path d="M328 173c-17-17-43-26-73-26-44 0-73 21-73 54 0 29 25 43 75 56 50 12 75 28 75 58 0 35-30 56-75 56-33 0-62-12-83-32" fill="none" stroke="url(#mark)" stroke-width="39" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="384" cy="161" r="19" fill="#d1f5a8"/>
 </svg>

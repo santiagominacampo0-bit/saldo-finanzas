@@ -26,10 +26,16 @@ jobs:
         uses: actions/checkout@v6
       - name: Configure Pages
         uses: actions/configure-pages@v6
+      - name: Prepare site
+        run: |
+          mkdir -p _site/vendor
+          cp index.html privacy.html manifest.webmanifest styles.css app.js saldo-state.js supabase-config.js sw.js _site/
+          cp -r icons _site/
+          cp vendor/supabase.js vendor/SUPABASE_JS_LICENSE _site/vendor/
       - name: Upload site
         uses: actions/upload-pages-artifact@v5
         with:
-          path: .
+          path: _site
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v5

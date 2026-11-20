@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#f7f8f5" />
     <title>Privacidad — Saldo</title>
     <link rel="icon" href="./icons/saldo.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=3" />
     <style>
       .privacy-page { max-width: 760px; margin: 0 auto; padding: 34px 20px 70px; }
       .privacy-page .brand { padding: 0 0 28px; }
@@ -21,21 +21,27 @@
   </head>
   <body>
     <main class="privacy-page">
-      <a class="brand" href="./"><span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h17"/><path d="m7 15 4-4 3 2 6-7"/><path d="M16 6h4v4"/></svg></span><span>saldo</span></a>
+      <a class="brand" href="./"><span class="brand-mark"><img src="./icons/saldo.svg" alt="" width="36" height="36" /></span><span>saldo</span></a>
       <article class="privacy-document">
-        <p class="updated">Versión de la app: almacenamiento local</p>
+        <p class="updated">Actualizada el 20 de noviembre de 2026</p>
         <h1>Política de privacidad</h1>
-        <p>Saldo ayuda a registrar manualmente ingresos, gastos y presupuestos personales. Esta versión está diseñada para guardar tus registros en el almacenamiento del navegador de tu dispositivo.</p>
-        <h2>Qué información se guarda</h2>
-        <p>El nombre de perfil que escribas, tus movimientos financieros, categorías, presupuestos y preferencias de notificación. Esa información se guarda localmente en el navegador; esta versión no crea una cuenta en la nube, no sincroniza entre dispositivos y no se conecta a bancos ni procesa pagos.</p>
-        <h2>Quién recibe tus datos</h2>
-        <p>Los movimientos y el perfil no se envían al responsable de Saldo. El navegador sí solicita los archivos de la aplicación al servicio que aloja el sitio (por ejemplo, GitHub Pages). Si activas notificaciones, el sistema operativo y el navegador gestionan el permiso y la entrega del aviso. La función de envío push cuando la app está cerrada no está conectada en esta versión.</p>
-        <h2>Copias y eliminación</h2>
-        <p>Puedes exportar una copia JSON desde Cuenta. El archivo queda bajo tu control y puede incluir toda la información financiera ingresada. Importar una copia reemplaza los datos locales actuales. También puedes borrar los datos desde Cuenta o desde los ajustes de almacenamiento de tu navegador.</p>
-        <h2>Limitaciones</h2>
-        <p>Si borras los datos del navegador, desinstalas la app o cambias de dispositivo sin importar una copia, podrías perder tus registros. No incluyas información que no desees guardar en el dispositivo. Si en el futuro se añade inicio de sesión en la nube, sincronización, analítica o conexión bancaria, esta política deberá actualizarse antes de activar esas funciones.</p>
-        <h2>Contacto</h2>
-        <p>El responsable de la publicación deberá añadir aquí un correo de contacto antes de distribuir Saldo públicamente.</p>
+        <p>Saldo permite registrar manualmente ingresos, gastos, presupuestos y preferencias. No se conecta a bancos, no mueve dinero y no procesa pagos.</p>
+        <h2>Datos que guarda Saldo</h2>
+        <p>Sin iniciar sesión, el perfil, los movimientos, presupuestos y preferencias se guardan en el almacenamiento local de este navegador. Al crear una cuenta, el correo y la contraseña se usan mediante Supabase Auth; los movimientos, perfil y preferencias se sincronizan con Supabase para que puedas recuperar la información en tus dispositivos.</p>
+        <p>Al activar notificaciones push, Supabase guarda la dirección de suscripción del dispositivo y las claves técnicas necesarias para enviar avisos. El contenido financiero no se incluye en las notificaciones.</p>
+        <h2>Servicios que intervienen</h2>
+        <p>GitHub Pages entrega los archivos públicos de la aplicación. Supabase proporciona autenticación, almacenamiento de datos y una función que envía avisos push a través del servicio de notificaciones del navegador o sistema operativo. Estos servicios reciben la información técnica necesaria para operar sus funciones. Revisa las políticas y disponibilidad de esos proveedores antes de usar la sincronización.</p>
+        <h2>Control y eliminación</h2>
+        <ul>
+          <li>Puedes exportar e importar una copia JSON desde Cuenta. La copia puede contener todos los movimientos que registraste.</li>
+          <li><strong>Borrar todos mis datos</strong> elimina los registros financieros del dispositivo y de la nube, pero conserva la cuenta de acceso.</li>
+          <li>Al cerrar sesión, la cuenta se oculta en el navegador. Los cambios pendientes se conservan en el dispositivo para sincronizarse al volver a entrar.</li>
+        </ul>
+        <p>Si eliminas el almacenamiento del navegador antes de iniciar sesión, los datos que solo existan en ese dispositivo pueden perderse. No incluyas información que no quieras guardar en el navegador o en tu cuenta.</p>
+        <h2>Seguridad y disponibilidad</h2>
+        <p>La conexión con Supabase usa HTTPS y las filas de datos están limitadas por reglas de acceso por cuenta. Ningún servicio en línea garantiza disponibilidad permanente: el plan gratuito de Supabase puede tener límites y pausas. Descarga periódicamente una copia si necesitas conservar tus registros.</p>
+        <h2>Responsable y contacto</h2>
+        <p>La aplicación la mantiene el titular del repositorio público <a href="https://github.com/santiagominacampo0-bit">santiagominacampo0-bit en GitHub</a>. No publiques datos financieros en incidencias, comentarios o canales públicos. Antes de una distribución comercial o masiva, el responsable debe añadir un canal de contacto privado y revisar los requisitos legales aplicables.</p>
       </article>
     </main>
   </body>

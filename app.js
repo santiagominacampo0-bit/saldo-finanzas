@@ -1,9 +1,12 @@
-const CATEGORIES = {
-  income: ['Salario', 'Ventas', 'Freelance', 'Inversiones', 'Otros ingresos'],
-  expense: ['Alimentación', 'Transporte', 'Hogar', 'Salud', 'Educación', 'Ocio', 'Servicios', 'Deudas', 'Otros gastos'],
-};
+const { categories: CATEGORIES, normalize: normalizeState, merge: mergeStates, equal: sameState, validDate, positiveAmount } = window.SaldoState;
 const CATEGORY_COLORS = ['#87ad89', '#d5a45f', '#8caec0', '#c78e78', '#a895bd', '#77a99c', '#d18778', '#b8a66e', '#8c9ca7'];
 const STORE_KEY = 'saldo-personal-v1';
+const cloudConfig = window.SALDO_CONFIG || {};
+const supabaseClient = window.supabase?.createClient && cloudConfig.supabaseUrl && cloudConfig.publishableKey
+  ? window.supabase.createClient(cloudConfig.supabaseUrl, cloudConfig.publishableKey, {
+      auth: { autoRefreshToken: true, persistSession: true, detectSessionInUrl: true },
+    })
+  : null;
 const NAV = [
   { id: 'home', label: 'Inicio', icon: 'home' },
   { id: 'movements', label: 'Movimientos', icon: 'arrows' },
@@ -37,52 +40,200 @@ const ICONS = {
 };
 
 const root = document.getElementById('app');
-let state = readState();
+let storageKey = STORE_KEY;
+let state = readState(STORE_KEY);
 let activeTab = 'home';
 let viewMonth = currentMonth();
 let transactionFilter = 'all';
 let searchTerm = '';
 let modal = null;
 let installPrompt = null;
+let authUser = null;
+let cloudStatus = supabaseClient ? 'local' : 'not-configured';
+let devicePushEnabled = false;
+let cloudSaveChain = Promise.resolve();
+let cloudSaveTimer = null;
+let cloudBase = null;
+let cloudDirty = false;
+let cloudReset = false;
+let cloudEpoch = 0;
+let authBooting = Boolean(supabaseClient);
+let guestMode = false;
+let authMode = 'signin';
+let authEmail = '';
+let authMessage = '';
+let authBusy = false;
+let lastView = '';
+let adminStatus = null;
+let adminFactor = null;
+let adminSummary = null;
 
-function blankState() {
-  return {
-    profile: { name: '' },
-    transactions: [],
-    budgets: {},
-    settings: { notificationsEnabled: false, remindersEnabled: false, reminderDay: '1', reminderTime: '19:00' },
-    alertedBudgets: {},
-    lastReminder: '',
-  };
+const blankState = () => normalizeState();
+function readLocal(key) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null'); }
+  catch { return null; }
 }
 
-function readState() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
-    if (!saved || typeof saved !== 'object') return blankState();
-    const fresh = blankState();
-    return {
-      ...fresh,
-      ...saved,
-      profile: { ...fresh.profile, ...(saved.profile || {}) },
-      settings: { ...fresh.settings, ...(saved.settings || {}) },
-      transactions: Array.isArray(saved.transactions) ? saved.transactions : [],
-      budgets: saved.budgets && typeof saved.budgets === 'object' ? saved.budgets : {},
-      alertedBudgets: saved.alertedBudgets && typeof saved.alertedBudgets === 'object' ? saved.alertedBudgets : {},
-    };
-  } catch {
-    return blankState();
-  }
+function readState(key) {
+  return normalizeState(readLocal(key));
 }
 
-function persist() {
+function storeState() {
+  const payload = authUser ? { state, base: cloudBase, dirty: cloudDirty, reset: cloudReset } : state;
+  try { localStorage.setItem(storageKey, JSON.stringify(payload)); return true; }
+  catch { return false; }
+}
+
+function persist({ cloud = true } = {}) {
+  if (authUser && cloud) cloudDirty = true;
+  const saved = storeState();
+  if (!saved) toast('El navegador no pudo guardar una copia en este dispositivo.', 'error');
+  if (authUser && cloud) queueCloudSave();
+  return saved;
+}
+
+async function synchronizeUser(userId, epoch) {
+  const current = () => authUser?.id === userId && cloudEpoch === epoch;
+  if (!current()) return false;
+  cloudStatus = 'saving';
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(state));
-    return true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const remoteResult = await supabaseClient.from('saldo_data')
+        .select('payload,version').eq('user_id', userId).maybeSingle();
+      if (!current()) return false;
+      if (remoteResult.error) throw remoteResult.error;
+      const row = remoteResult.data;
+      const remote = normalizeState(row?.payload);
+      const local = normalizeState(state);
+      const resetting = cloudReset;
+      const next = resetting ? local : cloudDirty ? mergeStates(cloudBase || blankState(), local, remote) : remote;
+
+      if ((!row && cloudDirty) || (row && !sameState(next, remote))) {
+        const payload = { payload: next, version: (row?.version || 0) + 1, updated_at: new Date().toISOString() };
+        if (row) {
+          const saved = await supabaseClient.from('saldo_data').update(payload)
+            .eq('user_id', userId).eq('version', row.version).select('version').maybeSingle();
+          if (saved.error) throw saved.error;
+          if (!saved.data) continue;
+        } else {
+          const saved = await supabaseClient.from('saldo_data').insert({ user_id: userId, ...payload });
+          if (saved.error?.code === '23505') continue;
+          if (saved.error) throw saved.error;
+        }
+      }
+
+      if (!current()) return false;
+      const latestLocal = normalizeState(state);
+      const resetDuringWrite = cloudReset && !resetting;
+      const merged = resetDuringWrite ? latestLocal : mergeStates(local, latestLocal, next);
+      const changed = !sameState(merged, latestLocal);
+      state = merged;
+      cloudBase = next;
+      cloudReset = resetDuringWrite;
+      cloudDirty = cloudReset || !sameState(merged, next);
+      cloudStatus = cloudDirty ? 'pending' : 'synced';
+      storeState();
+      if (cloudDirty) queueCloudSave();
+      if (changed) renderAfterSync();
+      else updateCloudStatus();
+      return true;
+    }
   } catch {
-    toast('No hay espacio disponible para guardar los cambios.', 'error');
-    return false;
+    // Keep the local edits for the next refresh or retry.
   }
+  if (current()) { cloudStatus = 'error'; updateCloudStatus(); }
+  return false;
+}
+
+function renderAfterSync() {
+  if (modal || document.activeElement?.matches('input, select, textarea')) {
+    updateCloudStatus();
+    return;
+  }
+  render();
+}
+
+function saveCloudNow() {
+  if (!authUser || !supabaseClient) return Promise.resolve(false);
+  window.clearTimeout(cloudSaveTimer);
+  const { id } = authUser;
+  const epoch = cloudEpoch;
+  cloudSaveChain = cloudSaveChain.catch(() => false).then(() => synchronizeUser(id, epoch));
+  return cloudSaveChain;
+}
+
+function queueCloudSave() {
+  if (!authUser || !supabaseClient) return;
+  cloudStatus = 'pending';
+  updateCloudStatus();
+  window.clearTimeout(cloudSaveTimer);
+  cloudSaveTimer = window.setTimeout(() => void saveCloudNow(), 400);
+}
+
+function handleSignedIn(user) {
+  if (!user) return;
+  if (authUser?.id === user.id) { authUser = user; return; }
+  cloudEpoch += 1;
+  authUser = user;
+  guestMode = false;
+  cloudStatus = 'loading';
+  storageKey = STORE_KEY + ':user:' + user.id;
+  const stored = readLocal(storageKey);
+  state = normalizeState(stored?.state ?? stored);
+  cloudBase = stored?.base ? normalizeState(stored.base) : null;
+  cloudDirty = Boolean(stored?.dirty || (stored && !stored.state));
+  cloudReset = Boolean(stored?.reset);
+  activeTab = 'home';
+  modal = null;
+  render();
+  void saveCloudNow();
+  void checkAdminAccess();
+  void refreshDevicePushStatus().then(() => {
+    if (activeTab === 'account' && !document.activeElement?.matches('input, select, textarea')) render();
+  });
+}
+
+function handleSignedOut() {
+  window.clearTimeout(cloudSaveTimer);
+  cloudEpoch += 1;
+  authUser = null;
+  devicePushEnabled = false;
+  cloudBase = null;
+  cloudDirty = false;
+  cloudReset = false;
+  guestMode = false;
+  authBooting = false;
+  authMode = 'signin';
+  authBusy = false;
+  adminStatus = adminFactor = adminSummary = null;
+  storageKey = STORE_KEY;
+  state = readState(STORE_KEY);
+  authMessage = '';
+  cloudStatus = supabaseClient ? 'local' : 'not-configured';
+  activeTab = 'home';
+  modal = null;
+  render();
+}
+
+function initializeCloud() {
+  if (!supabaseClient) return;
+  const fragment = new URLSearchParams(location.hash.slice(1));
+  const authError = fragment.get('error_code') || new URLSearchParams(location.search).get('error_code');
+  if (authError) {
+    authMessage = 'El enlace de acceso caducó o ya fue utilizado. Puedes solicitar otro.';
+    history.replaceState(history.state, '', location.pathname);
+  }
+  supabaseClient.auth.onAuthStateChange((event, session) => {
+    window.setTimeout(() => {
+      authBooting = false;
+      if (event === 'SIGNED_OUT') { handleSignedOut(); return; }
+      if (event === 'PASSWORD_RECOVERY' && session?.user) authMode = 'new-password';
+      if (session?.user) {
+        handleSignedIn(session.user);
+        if (authMode === 'new-password') render();
+      } else if (event === 'INITIAL_SESSION') render();
+    }, 0);
+  });
 }
 
 function svg(name, className = '') {
@@ -176,18 +327,21 @@ function navButton(item, mobile = false) {
 
 function shell() {
   const name = state.profile.name.trim();
-  const initial = name ? escapeHTML(name[0].toUpperCase()) : 'T';
+  const initial = name ? escapeHTML(name[0].toUpperCase()) : 'S';
   const greeting = name ? `Hola, ${escapeHTML(name)}` : 'Hola, ¿cómo vas?';
-  const topTitle = NAV.find(item => item.id === activeTab)?.label || 'Inicio';
+  const topTitle = activeTab === 'admin' ? 'Administración' : NAV.find(item => item.id === activeTab)?.label || 'Inicio';
+  const profileCaption = authUser ? cloudStatusLabel() : 'Este dispositivo';
+  const privacyTitle = authUser ? 'Cuenta protegida' : 'Tu información es privada';
+  const privacyCopy = authUser ? 'Tus datos se guardan en este dispositivo y se sincronizan con tu cuenta.' : 'Los movimientos permanecen en este dispositivo hasta que inicies sesión.';
   const dateLine = new Intl.DateTimeFormat('es-CO', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
   return `<div class="app-shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">${svg('chart')}</span><span class="brand-word">saldo</span></div>
+      <div class="brand"><span class="brand-mark">${brandMark()}</span><span class="brand-word">saldo</span></div>
       <div class="nav-label">Menú</div>
       <nav class="nav-list" aria-label="Principal">${NAV.map(item => navButton(item)).join('')}</nav>
       <div class="sidebar-bottom">
-        <div class="privacy-note"><strong>Tu información es privada</strong>Los datos de esta versión se guardan en este dispositivo.</div>
-        <div class="profile-chip"><span class="avatar">${initial}</span><span class="profile-info"><span class="profile-name">${name || 'Mi perfil'}</span><span class="profile-caption">Este dispositivo</span></span></div>
+        <div class="privacy-note"><strong>${privacyTitle}</strong>${privacyCopy}</div>
+        <div class="profile-chip"><span class="avatar">${initial}</span><span class="profile-info"><span class="profile-name">${escapeHTML(name) || 'Mi perfil'}</span><span class="profile-caption">${profileCaption}</span></span></div>
       </div>
     </aside>
     <main class="main-area">
@@ -198,11 +352,11 @@ function shell() {
           <button class="primary-button" data-action="new-transaction">${svg('plus')}<span>Nuevo movimiento</span></button>
         </div>
       </header>
-      <section class="content">${renderView()}</section>
+      <section class="content ${lastView !== activeTab ? 'view-arrive' : ''}">${renderView()}</section>
     </main>
     <nav class="mobile-nav" aria-label="Principal">${NAV.map(item => navButton(item, true)).join('')}</nav>
     <div class="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <div class="install-banner" id="install-banner"><span class="brand-mark">${svg('chart')}</span><div class="install-copy"><strong>Instala Saldo</strong><span>Ábrela desde tu pantalla de inicio</span></div><button class="secondary-button" data-action="install-app">Instalar</button><button class="icon-button" data-action="dismiss-install" aria-label="Cerrar">${svg('close')}</button></div>
+    <div class="install-banner" id="install-banner"><span class="brand-mark">${brandMark()}</span><div class="install-copy"><strong>Instala Saldo</strong><span>Ábrela desde tu pantalla de inicio</span></div><button class="secondary-button" data-action="install-app">Instalar</button><button class="icon-button" data-action="dismiss-install" aria-label="Cerrar">${svg('close')}</button></div>
     ${modal ? renderModal() : ''}
   </div>`;
 }
@@ -212,6 +366,7 @@ function renderView() {
   if (activeTab === 'budgets') return renderBudgets();
   if (activeTab === 'reports') return renderReports();
   if (activeTab === 'account') return renderAccount();
+  if (activeTab === 'admin' && authUser) return renderAdmin();
   return renderHome();
 }
 
@@ -226,7 +381,7 @@ function renderHome() {
   const visibleBudgets = Object.entries(budgets).filter(([, value]) => Number(value) > 0).slice(0, 4);
   return `<section class="hero-grid">
     <article class="balance-card">
-      <div class="balance-top"><span class="balance-label">Balance registrado</span><span class="private-pill">${svg('lock')} Solo en este dispositivo</span></div>
+      <div class="balance-top"><span class="balance-label">Balance registrado</span><span class="private-pill">${svg('lock')} ${authUser ? cloudStatusLabel() : 'Solo en este dispositivo'}</span></div>
       <div class="balance-amount">${formatMoney(balance)}</div>
       <div class="balance-foot"><span>Resultado de todos tus movimientos guardados</span></div>
     </article>
@@ -334,22 +489,166 @@ function renderReports() {
       <article class="panel panel-pad"><div class="section-heading"><div><h2>Gastos por categoría</h2><p>${escapeHTML(monthName(viewMonth))}</p></div></div>${categories.length ? `<div class="category-list">${categories.map(([category, amount], index) => `<div class="category-row"><span class="category-row-name"><span class="category-dot" style="background:${CATEGORY_COLORS[index % CATEGORY_COLORS.length]}"></span>${escapeHTML(category)}</span><span class="category-row-value">${formatMoney(amount)}</span><span class="category-track"><span style="width:${expense ? Math.max(3, Math.round(amount / expense * 100)) : 0}%;background:${CATEGORY_COLORS[index % CATEGORY_COLORS.length]}"></span></span></div>`).join('')}</div>` : emptyTransactions('Todavía no hay gastos', 'Cuando registres gastos, aquí verás en qué categorías se concentran.')}</article></div>`;
 }
 
+function brandMark() {
+  return '<img src="./icons/saldo.svg" alt="" width="36" height="36" />';
+}
+
+function cloudStatusLabel() {
+  return ({
+    loading: 'Conectando…', pending: 'Cambios pendientes', saving: 'Sincronizando…',
+    synced: 'Sincronizado', error: 'Sin conexión con la nube', local: 'Solo en este dispositivo',
+    'not-configured': 'Conexión no configurada',
+  })[cloudStatus];
+}
+
+function updateCloudStatus() {
+  root.querySelectorAll('[data-cloud-status]').forEach(item => { item.textContent = cloudStatusLabel(); });
+}
+
+const authViews = {
+  signin: ['Inicia sesión', 'Abre tu cuenta de Saldo.', 'Iniciar sesión'],
+  signup: ['Crea tu cuenta', 'Confirma tu correo para sincronizar tus movimientos.', 'Crear cuenta'],
+  recovery: ['Recupera tu cuenta', 'Te enviaremos un enlace a tu correo.', 'Enviar enlace'],
+  'new-password': ['Elige una contraseña nueva', 'Usa al menos 8 caracteres.', 'Guardar contraseña'],
+  admin: ['Acceso de administrador', 'Entra con tu cuenta de Saldo. El panel solicita un segundo factor.', 'Continuar'],
+};
+
+function renderAuth() {
+  const [title, description, submit] = authViews[authMode];
+  const changing = authMode === 'new-password';
+  const needsPassword = authMode !== 'recovery';
+  const authForm = authBooting
+    ? '<p role="status">Estamos abriendo Saldo…</p>'
+    : !supabaseClient
+      ? '<p role="status">La conexión a la cuenta no está disponible.</p>'
+      : `<form id="auth-form" class="auth-panel">
+          <div class="form-grid">
+            ${changing ? '' : `<div class="field full"><label for="auth-email">Correo electrónico</label><input id="auth-email" name="email" type="email" autocomplete="username" inputmode="email" maxlength="254" required value="${escapeHTML(authEmail)}" /></div>`}
+            ${needsPassword ? `<div class="field full"><label for="auth-password">Contraseña</label><input id="auth-password" name="password" type="password" autocomplete="${authMode === 'signup' || changing ? 'new-password' : 'current-password'}" ${authMode === 'signup' || changing ? 'minlength="8"' : ''} maxlength="128" required /></div>` : ''}
+            ${changing ? '<div class="field full"><label for="auth-confirm">Repite la contraseña</label><input id="auth-confirm" name="confirm" type="password" minlength="8" maxlength="128" autocomplete="new-password" required /></div>' : ''}
+          </div>
+          ${authMode === 'signin' ? '<button class="text-button" type="button" data-action="auth-mode" data-mode="recovery">Olvidé mi contraseña</button>' : ''}
+          <p class="auth-feedback" id="auth-feedback" role="status">${escapeHTML(authMessage)}</p>
+          <button class="primary-button" type="submit" ${authBusy ? 'disabled' : ''}>${authBusy ? 'Un momento…' : submit}</button>
+        </form>`;
+  return `<main class="auth-shell">
+    <section class="auth-intro" aria-label="Saldo">
+      <span class="auth-hero-mark">${brandMark()}</span>
+      <p class="brand-word">saldo</p><h1>Tus finanzas, claras.</h1>
+      <p>Organiza tus ingresos, gastos y presupuestos en pesos colombianos.</p>
+    </section>
+    <section class="auth-card" aria-labelledby="auth-title">
+      ${['signin', 'signup'].includes(authMode) && !authBooting ? `<div class="auth-mode-switch" aria-label="Acceso a Saldo"><button type="button" data-action="auth-mode" data-mode="signin" aria-pressed="${authMode === 'signin'}">Ingresar</button><button type="button" data-action="auth-mode" data-mode="signup" aria-pressed="${authMode === 'signup'}">Crear cuenta</button></div>` : ''}
+      <h2 id="auth-title">${title}</h2><p>${description}</p>
+      ${authForm}
+      <div class="auth-actions">
+        ${changing || authBooting ? '' : authMode === 'signin' ? '<button class="secondary-button" data-action="guest">Usar en este dispositivo</button><button class="text-button" data-action="auth-mode" data-mode="admin">Acceso de administrador</button>' : '<button class="text-button" data-action="auth-mode" data-mode="signin">Volver al inicio de sesión</button>'}
+        ${changing ? '<button class="text-button" data-action="sign-out">Cancelar y cerrar sesión</button>' : ''}
+      </div>
+      <footer class="auth-footer"><a class="text-button" href="./privacy.html">Privacidad</a></footer>
+    </section>
+    <div class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  </main>`;
+}
+
+async function checkAdminAccess() {
+  if (!authUser) return null;
+  const userId = authUser.id;
+  const { data, error } = await supabaseClient.rpc('saldo_admin_access');
+  if (authUser?.id !== userId || error) return null;
+  adminStatus = data;
+  if (activeTab === 'account' && !document.activeElement?.matches('input, select, textarea')) render();
+  return data;
+}
+
+async function openAdmin() {
+  activeTab = 'admin';
+  adminStatus = adminFactor = adminSummary = null;
+  render();
+  const access = await checkAdminAccess();
+  if (activeTab !== 'admin' || !authUser) return;
+  if (!access) { adminStatus = { unavailable: true }; render(); return; }
+  if (access.allowed && access.verified) {
+    const { data } = await supabaseClient.rpc('saldo_admin_summary');
+    if (activeTab !== 'admin' || !authUser) return;
+    adminSummary = data || { unavailable: true };
+  } else if (access.allowed) {
+    const { data } = await supabaseClient.auth.mfa.listFactors();
+    if (activeTab !== 'admin' || !authUser) return;
+    adminFactor = data?.totp.find(factor => factor.status === 'verified') || null;
+  }
+  render();
+}
+
+async function enrollAdminFactor() {
+  if (!adminStatus?.allowed || adminFactor) return;
+  const { data, error } = await supabaseClient.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Saldo', issuer: 'Saldo' });
+  if (activeTab !== 'admin' || !authUser) return;
+  if (error || !data?.totp) { toast('No pudimos preparar la verificación. Intenta de nuevo.', 'error'); return; }
+  adminFactor = { id: data.id, secret: data.totp.secret };
+  render();
+  root.querySelector('#admin-code')?.focus();
+}
+
+async function verifyAdminCode(form) {
+  if (!adminFactor || !adminStatus?.allowed || !form.reportValidity()) return;
+  const code = String(new FormData(form).get('code') || '').trim();
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  const { error } = await supabaseClient.auth.mfa.challengeAndVerify({ factorId: adminFactor.id, code });
+  submit.disabled = false;
+  if (error) { toast('Código inválido o vencido.', 'error'); return; }
+  void openAdmin();
+}
+
+function renderAdmin() {
+  let content = '<p role="status">Verificando acceso…</p>';
+  if (adminStatus?.unavailable) content = '<p>No pudimos consultar permisos. Vuelve a entrar para reintentar.</p>';
+  else if (adminStatus && !adminStatus.allowed) content = '<p>Esta cuenta no tiene acceso al panel administrativo.</p>';
+  else if (adminStatus?.allowed && !adminStatus.verified) {
+    const enroll = adminFactor?.secret ? `<p>En tu aplicación de autenticación, agrega una cuenta manual e ingresa esta clave:</p><p><code>${escapeHTML(adminFactor.secret)}</code></p>` : '';
+    content = adminFactor
+      ? `${enroll}<form id="admin-code-form"><div class="field"><label for="admin-code">Código de seis dígitos</label><input id="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required /></div><div class="account-actions"><button class="primary-button" type="submit">Verificar código</button></div></form>`
+      : '<p>Activa la verificación en dos pasos para entrar al panel.</p><button class="secondary-button" data-action="admin-enroll">Vincular autenticador</button>';
+  } else if (adminSummary?.unavailable) content = '<p>No pudimos cargar los indicadores.</p>';
+  else if (adminSummary) {
+    content = `<div class="report-kpis">
+      <article class="report-kpi"><span>Cuentas confirmadas</span><strong>${Number(adminSummary.accounts) || 0}</strong></article>
+      <article class="report-kpi"><span>Cuentas con datos</span><strong>${Number(adminSummary.sync_accounts) || 0}</strong></article>
+      <article class="report-kpi"><span>Dispositivos con push</span><strong>${Number(adminSummary.push_devices) || 0}</strong></article>
+    </div>`;
+  }
+  return `<section class="panel panel-pad"><div class="section-heading"><div><h2>Panel de administración</h2><p>Indicadores generales de Saldo</p></div></div>
+    ${content}<div class="account-actions"><button class="text-button" data-action="admin-return">Volver a Cuenta</button></div></section>`;
+}
+
 function renderAccount() {
   const name = state.profile.name || '';
   const reminders = state.settings.remindersEnabled;
-  const notifications = state.settings.notificationsEnabled && 'Notification' in window && Notification.permission === 'granted';
-  return `<div class="page-title-row"><div><h2>Tu cuenta y preferencias</h2><p>Configura tu perfil, tus avisos y tus copias de seguridad.</p></div><span class="local-badge">${svg('lock')} Perfil local</span></div>
+  const notifications = state.settings.notificationsEnabled;
+  const pushEnabled = Boolean(authUser && devicePushEnabled);
+  const statusLabel = cloudStatusLabel();
+  const local = readState(STORE_KEY);
+  const hasLocalRecords = local.transactions.length || Object.keys(local.budgets).length || local.profile.name;
+  const authPanel = authUser
+    ? `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Abre esta cuenta en tus dispositivos para ver tus movimientos.</p><div class="cloud-account"><span class="avatar">${svg('user')}</span><span><strong>${escapeHTML(authUser.email || 'Cuenta Saldo')}</strong><small data-cloud-status>${statusLabel}</small></span></div><div class="account-actions"><button class="secondary-button" data-action="sync-now">Sincronizar ahora</button><button class="secondary-button" data-action="sign-out">Cerrar sesión</button>${adminStatus?.allowed ? '<button class="secondary-button" data-action="admin-open">Administración</button>' : ''}${hasLocalRecords ? '<button class="text-button" data-action="import-local">Importar datos de invitado</button>' : ''}</div></section>`
+    : `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Inicia sesión para guardar una copia en la nube y sincronizar tus dispositivos.</p><div class="account-actions"><button class="primary-button" data-action="auth-mode" data-mode="signin">Iniciar sesión</button><button class="secondary-button" data-action="auth-mode" data-mode="signup">Crear cuenta</button></div></section>`;
+  const privacyTitle = authUser ? 'Tus datos están vinculados a tu cuenta' : 'Tus movimientos permanecen en este navegador';
+  const privacyCopy = authUser ? 'Saldo conserva una copia local y sincroniza tus registros con tu cuenta autenticada. Puedes cerrar sesión para ocultarlos en este dispositivo.' : 'Al iniciar sesión, podrás recuperar tus datos en otro dispositivo. Sin cuenta, usa la copia de seguridad antes de cambiar de teléfono.';
+  return `<div class="page-title-row"><div><h2>Tu cuenta y preferencias</h2><p>Configura tu perfil, tus avisos y tus copias de seguridad.</p></div><span class="local-badge">${svg('lock')} ${authUser ? statusLabel : 'Perfil local'}</span></div>
     <div class="profile-layout"><div class="panel">
+      ${authPanel}
       <section class="form-section"><h3>Mi perfil</h3><p>El nombre solo se usa para personalizar el saludo en este dispositivo.</p><form id="profile-form"><div class="form-grid"><div class="field full"><label for="profile-name">¿Cómo te llamamos?</label><input id="profile-name" name="name" maxlength="48" value="${escapeHTML(name)}" placeholder="Tu nombre" autocomplete="name" /></div><div class="field"><label>Moneda</label><input value="Peso colombiano (COP)" disabled aria-label="Moneda peso colombiano" /></div><div class="field"><label>Registros guardados</label><input value="${state.transactions.length}" disabled aria-label="Cantidad de movimientos" /></div></div><div class="form-actions"><button class="primary-button" type="submit">Guardar perfil</button></div></form></section>
-      <section class="form-section"><h3>Recordatorios</h3><p>Los avisos del navegador necesitan tu permiso. Los recordatorios se revisan cuando Saldo está abierta.</p>
+      <section class="form-section"><h3>Recordatorios</h3><p>Elige cuándo quieres recibir avisos de presupuesto y recordatorios.</p>
         <div class="setting-row"><div><strong>Avisos de presupuesto</strong><small>Te avisa cuando un gasto registrado alcanza el 80% o supera un presupuesto.</small></div><button class="switch ${notifications ? 'on' : ''}" data-action="toggle-notifications" role="switch" aria-checked="${notifications}" aria-label="Activar avisos de presupuesto"></button></div>
-        <div class="setting-row"><div><strong>Recordatorio mensual</strong><small>Te invita a revisar tus movimientos una vez al mes, mientras la app está abierta.</small></div><button class="switch ${reminders ? 'on' : ''}" data-action="toggle-reminders" role="switch" aria-checked="${reminders}" aria-label="Activar recordatorio mensual"></button></div>
-        <div class="reminder-controls"><label>Día del mes<select name="reminder-day" id="reminder-day">${Array.from({ length: 28 }, (_, i) => i + 1).map(day => `<option value="${day}" ${String(day) === String(state.settings.reminderDay) ? 'selected' : ''}>${day}</option>`).join('')}</select></label><label>Hora aproximada<input id="reminder-time" type="time" value="${escapeHTML(state.settings.reminderTime)}" /></label></div>
+        <div class="setting-row"><div><strong>Notificaciones push</strong><small>${!cloudConfig.pushAvailable ? 'El envío en segundo plano aún no está activo.' : authUser ? 'Recibe avisos incluso cuando Saldo está cerrada.' : 'Inicia sesión para activar los avisos cuando la app está cerrada.'}</small></div><button class="switch ${pushEnabled ? 'on' : ''}" data-action="toggle-push" role="switch" aria-checked="${pushEnabled}" aria-label="Activar notificaciones push" ${authUser && cloudConfig.pushAvailable ? '' : 'disabled'}></button></div>
+        <div class="setting-row"><div><strong>Recordatorio mensual</strong><small>Te invita a revisar tus movimientos en el día y hora que elijas.</small></div><button class="switch ${reminders ? 'on' : ''}" data-action="toggle-reminders" role="switch" aria-checked="${reminders}" aria-label="Activar recordatorio mensual"></button></div>
+        <div class="reminder-controls"><label>Día del mes<select name="reminder-day" id="reminder-day">${Array.from({ length: 28 }, (_, i) => i + 1).map(day => `<option value="${day}" ${String(day) === String(state.settings.reminderDay) ? 'selected' : ''}>${day}</option>`).join('')}</select></label><label>Hora aproximada<input id="reminder-time" required type="time" value="${escapeHTML(state.settings.reminderTime)}" /></label></div>
         <div class="account-actions"><button class="secondary-button" data-action="test-notification">${svg('bell')} Enviar aviso de prueba</button></div>
       </section>
       <section class="form-section"><h3>Guardar o trasladar tus datos</h3><p>Descarga una copia antes de cambiar de teléfono o limpiar el navegador.</p><div class="account-actions"><button class="secondary-button" data-action="export-json">${svg('download')} Descargar copia</button><button class="secondary-button" data-action="import-json">Importar copia</button><input hidden id="import-file" type="file" accept="application/json,.json" /></div><div class="account-actions"><button class="danger-button" data-action="clear-data">Borrar todos mis datos</button></div></section>
     </div>
-    <aside class="panel panel-pad"><div class="section-heading"><div><h2>Privacidad y conexión</h2><p>Así se comporta esta primera versión.</p></div></div><div class="muted-panel"><strong>${svg('shield')} Tus movimientos no salen de este navegador</strong><p>Saldo guarda la información localmente. No lee tus cuentas bancarias, no procesa pagos y no envía movimientos a un servidor. Si borras los datos del navegador, puedes perderlos; usa la copia de seguridad.</p></div><div class="setting-row"><div><strong>Cuenta en la nube</strong><small>El inicio de sesión y la sincronización entre dispositivos se activan al conectar el backend del propietario.</small></div></div><div class="setting-row"><div><strong>Notificaciones push</strong><small>El envío push cuando la app está cerrada necesita un servidor de notificaciones; GitHub Pages solo aloja los archivos estáticos.</small></div></div><div class="account-actions"><a class="text-button" href="./privacy.html">Política de privacidad</a><button class="text-button" data-action="install-help">Cómo instalar en mi teléfono</button></div></aside></div>`;
+    <aside class="panel panel-pad"><div class="section-heading"><div><h2>Privacidad y conexión</h2><p>Tu información se usa solo para las funciones de Saldo.</p></div></div><div class="muted-panel"><strong>${svg('shield')} ${privacyTitle}</strong><p>${privacyCopy} Saldo no lee tus cuentas bancarias ni procesa pagos.</p></div><div class="setting-row"><div><strong>Sincronización</strong><small>${authUser ? 'Tus movimientos, presupuestos y preferencias se sincronizan al iniciar sesión.' : 'Los datos permanecen locales hasta que inicies sesión.'}</small></div></div><div class="setting-row"><div><strong>Avisos con la app cerrada</strong><small>${pushEnabled ? 'Push está activado para este dispositivo.' : 'El permiso del teléfono se solicita al activar push.'}</small></div></div><div class="account-actions"><a class="text-button" href="./privacy.html">Política de privacidad</a><button class="text-button" data-action="install-help">Cómo instalar en mi teléfono</button></div></aside></div>`;
 }
 
 function renderModal() {
@@ -372,11 +671,16 @@ function renderTransactionModal() {
 function renderBudgetModal() {
   const category = modal.category;
   const amount = Number(monthBudgets()[category] || 0);
-  return `<div class="modal-backdrop" data-action="backdrop-close"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-header"><div><h2 id="modal-title">Presupuesto de ${escapeHTML(category)}</h2><p>${escapeHTML(monthName(viewMonth))}</p></div><button class="icon-button" data-action="close-modal" aria-label="Cerrar">${svg('close')}</button></div><div class="modal-body"><form id="budget-form" class="modal-form"><input type="hidden" name="category" value="${escapeHTML(category)}"/><div class="field field-amount"><label for="budget-amount">Límite mensual en pesos</label><input id="budget-amount" name="amount" type="number" inputmode="decimal" min="0" step="1000" value="${amount || ''}" placeholder="Ej. 300000" /><span class="field-help">Escribe 0 o deja el campo vacío para quitar el límite.</span></div><div class="modal-form-actions"><button class="secondary-button" type="button" data-action="close-modal">Cancelar</button><button class="primary-button" type="submit">Guardar presupuesto</button></div></form></div></section></div>`;
+  return `<div class="modal-backdrop" data-action="backdrop-close"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-header"><div><h2 id="modal-title">Presupuesto de ${escapeHTML(category)}</h2><p>${escapeHTML(monthName(viewMonth))}</p></div><button class="icon-button" data-action="close-modal" aria-label="Cerrar">${svg('close')}</button></div><div class="modal-body"><form id="budget-form" class="modal-form"><input type="hidden" name="category" value="${escapeHTML(category)}"/><div class="field field-amount"><label for="budget-amount">Límite mensual en pesos</label><input id="budget-amount" name="amount" type="number" inputmode="decimal" min="0" step="1" value="${amount || ''}" placeholder="Ej. 300000" /><span class="field-help">Escribe 0 o deja el campo vacío para quitar el límite.</span></div><div class="modal-form-actions"><button class="secondary-button" type="button" data-action="close-modal">Cancelar</button><button class="primary-button" type="submit">Guardar presupuesto</button></div></form></div></section></div>`;
 }
 
 function render(options = {}) {
-  root.innerHTML = shell();
+  const gated = authBooting || authMode === 'new-password' || (!authUser && !guestMode);
+  root.innerHTML = gated ? renderAuth() : shell();
+  lastView = gated ? '' : activeTab;
+  if (!gated && installPrompt && localStorage.getItem('saldo-install-dismissed') !== '1') {
+    document.getElementById('install-banner')?.classList.add('visible');
+  }
   if (options.focus) {
     const field = root.querySelector(`#${options.focus}`);
     if (field) {
@@ -405,18 +709,19 @@ function openTransaction(id = null) {
 function saveTransaction(form) {
   const data = new FormData(form);
   const amount = Number(data.get('amount'));
-  if (!Number.isFinite(amount) || amount <= 0) return toast('Escribe un valor mayor que cero.', 'error');
+  if (!positiveAmount(Math.round(amount))) return toast('Escribe un valor mayor que cero y menor a un billón.', 'error');
   const type = data.get('type') === 'income' ? 'income' : 'expense';
   const id = modal.id || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const tx = { id, type, amount: Math.round(amount), title: String(data.get('title') || '').trim(), category: String(data.get('category') || ''), date: String(data.get('date') || todayString()), note: String(data.get('note') || '').trim() };
+  if (!tx.title || !validDate(tx.date) || !CATEGORIES[type].includes(tx.category)) return toast('Revisa el concepto, la fecha y la categoría.', 'error');
   const exists = state.transactions.some(item => item.id === id);
   state.transactions = exists ? state.transactions.map(item => item.id === id ? tx : item) : [...state.transactions, tx];
   const month = tx.date.slice(0, 7);
   persist();
   modal = null;
-  if (!exists && tx.type === 'expense') checkBudgetAlerts(month, tx.category);
+  const alert = tx.type === 'expense' ? checkBudgetAlerts(month, tx.category) : '';
   render();
-  toast(exists ? 'Movimiento actualizado.' : 'Movimiento guardado.');
+  toast(alert || (exists ? 'Movimiento actualizado.' : 'Movimiento guardado.'), alert ? 'info' : 'success');
 }
 
 function checkBudgetAlerts(month, category) {
@@ -428,51 +733,225 @@ function checkBudgetAlerts(month, category) {
   if (!stage || Number(state.alertedBudgets[key] || 0) >= Number(stage)) return;
   state.alertedBudgets[key] = Number(stage);
   persist();
-  const message = stage === '100' ? `Superaste el presupuesto de ${category}.` : `Ya usaste el 80% del presupuesto de ${category}.`;
-  sendNotice('Aviso de presupuesto', message);
+  const message = stage === '100' ? `Alcanzaste el límite de ${category}.` : `Ya usaste el 80% del presupuesto de ${category}.`;
+  if (devicePushEnabled) {
+    void sendPushNotification(stage === '100' ? 'budget_100' : 'budget_80').catch(() => {});
+  } else void sendNotice('Aviso de presupuesto', message);
+  return message;
 }
 
-function sendNotice(title, body) {
+async function sendNotice(title, body) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  const options = {
+    body, icon: './icons/icon-192.png', badge: './icons/icon-192.png', tag: 'saldo-local',
+    data: { url: new URL('./', location.href).href },
+  };
   try {
-    const notice = new Notification(title, { body, icon: './icons/icon-192.png', badge: './icons/icon-192.png', tag: `saldo-${title.toLowerCase().replace(/\s/g, '-')}` });
-    notice.onclick = () => { window.focus(); notice.close(); };
+    const registration = await navigator.serviceWorker?.getRegistration();
+    if (registration?.active) await registration.showNotification(title, options);
+    else new Notification(title, options);
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 async function requestNotificationPermission() {
-  if (!('Notification' in window)) {
-    toast('Este navegador no permite avisos web.', 'error');
-    return false;
+  if (!('Notification' in window) || Notification.permission === 'denied') return false;
+  if (Notification.permission === 'granted') return true;
+  try { return await Notification.requestPermission() === 'granted'; }
+  catch { return false; }
+}
+
+function decodeVapidKey(value) {
+  const padding = '='.repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from(raw, character => character.charCodeAt(0));
+}
+
+async function refreshDevicePushStatus() {
+  if (!cloudConfig.pushAvailable || !authUser || !supabaseClient || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+    devicePushEnabled = false;
+    return;
   }
-  const permission = await Notification.requestPermission();
-  if (permission !== 'granted') {
-    state.settings.notificationsEnabled = false;
-    persist(); render();
-    toast('No se concedió permiso para notificaciones.', 'info');
-    return false;
+  try {
+    const registration = await navigator.serviceWorker?.getRegistration();
+    const subscription = await registration?.pushManager?.getSubscription();
+    if (!subscription) { devicePushEnabled = false; return; }
+    const { data, error } = await supabaseClient.from('push_subscriptions')
+      .select('endpoint').eq('user_id', authUser.id).eq('endpoint', subscription.endpoint).maybeSingle();
+    devicePushEnabled = !error && Boolean(data);
+  } catch {
+    devicePushEnabled = false;
   }
-  state.settings.notificationsEnabled = true;
-  persist(); render();
-  sendNotice('Saldo está listo', 'Te avisaremos sobre tus presupuestos mientras usas la app.');
-  toast('Avisos del dispositivo activados.');
-  return true;
+}
+
+async function sendPushNotification(kind = 'test') {
+  if (!authUser || !supabaseClient) throw new Error('Inicia sesión para enviar avisos push.');
+  const { data, error } = await supabaseClient.functions.invoke('saldo-notify', { body: { kind } });
+  if (error) throw error;
+  return data || {};
+}
+
+async function enablePushNotifications() {
+  if (!authUser || !cloudConfig.pushAvailable) { toast('El envío push no está disponible en este momento.', 'info'); return; }
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    toast('Este dispositivo no admite notificaciones push web.', 'error');
+    return;
+  }
+  if (!cloudConfig.vapidPublicKey) { toast('Falta configurar la clave pública de push.', 'error'); return; }
+  const pushUserId = authUser.id;
+  let subscription = null;
+  try {
+    const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+    if (permission !== 'granted') {
+      toast(/iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'En iPhone, instala Saldo en la pantalla de inicio y vuelve a activar push.' : 'Permite las notificaciones para activar push.', 'info');
+      return;
+    }
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration?.active) throw new Error('El servicio de avisos aún se está iniciando.');
+    subscription = await registration.pushManager.getSubscription();
+    if (!subscription) subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: decodeVapidKey(cloudConfig.vapidPublicKey),
+    });
+    const keys = subscription.toJSON().keys || {};
+    if (!keys.p256dh || !keys.auth) throw new Error('El navegador no entregó las claves de suscripción.');
+    const { error } = await supabaseClient.from('push_subscriptions').upsert({
+      user_id: pushUserId,
+      endpoint: subscription.endpoint,
+      p256dh: keys.p256dh,
+      auth: keys.auth,
+    }, { onConflict: 'user_id,endpoint' });
+    if (error) throw error;
+    devicePushEnabled = true;
+    render();
+    toast('Push activado para este dispositivo. Puedes enviar un aviso de prueba.');
+  } catch {
+    if (subscription) {
+      await supabaseClient.from('push_subscriptions').delete()
+        .eq('user_id', pushUserId).eq('endpoint', subscription.endpoint);
+      await subscription.unsubscribe().catch(() => {});
+    }
+    devicePushEnabled = false;
+    render();
+    toast('No se pudo activar push. Revisa tu conexión y vuelve a intentarlo.', 'error');
+  }
+}
+
+async function disablePushNotifications(options = {}) {
+  try {
+    const registration = await navigator.serviceWorker?.getRegistration();
+    const subscription = await registration?.pushManager?.getSubscription();
+    if (subscription && authUser) {
+      await supabaseClient.from('push_subscriptions').delete()
+        .eq('user_id', authUser.id).eq('endpoint', subscription.endpoint);
+    }
+    if (subscription) await subscription.unsubscribe();
+  } catch {
+    if (!options.silent) toast('No se pudo quitar esta suscripción push.', 'error');
+  }
+  devicePushEnabled = false;
+  if (!options.silent) { persist(); render(); toast('Push quedó desactivado en este dispositivo.'); }
+}
+
+function changeAuthMode(mode) {
+  if (!authViews[mode] || authBusy) return;
+  authEmail = root.querySelector('#auth-email')?.value.trim() || authEmail;
+  authMessage = '';
+  authMode = mode;
+  guestMode = false;
+  render();
+  root.querySelector('#auth-email')?.focus();
+}
+
+function showAuthMessage(message) {
+  authMessage = message;
+  const feedback = root.querySelector('#auth-feedback');
+  if (feedback) feedback.textContent = message;
+}
+
+async function submitAuthForm(form) {
+  if (!supabaseClient || authBusy || !form.reportValidity()) return;
+  const mode = authMode;
+  const data = new FormData(form);
+  const email = String(data.get('email') || '').trim();
+  const password = String(data.get('password') || '');
+  if (mode === 'new-password' && password !== data.get('confirm')) {
+    showAuthMessage('Las contraseñas deben coincidir.');
+    return;
+  }
+  const submit = form.querySelector('button[type="submit"]');
+  authEmail = email;
+  authBusy = true;
+  submit.disabled = true;
+  submit.textContent = 'Un momento…';
+  showAuthMessage('');
+  try {
+    const redirectTo = new URL('./', location.href).href;
+    if (mode === 'recovery') {
+      const { error } = await supabaseClient.auth.resetPasswordForEmail(email, { redirectTo });
+      showAuthMessage(error ? 'No pudimos enviar el enlace. Intenta de nuevo más tarde.' : 'Si el correo está registrado y habilitado, recibirás el enlace.');
+      return;
+    }
+    if (mode === 'new-password') {
+      await supabaseClient.auth.updateUser({ password }).then(({ error }) => { if (error) throw error; });
+      authMode = 'signin';
+      render();
+      toast('Contraseña actualizada.');
+      return;
+    }
+    if (mode === 'signup') {
+      const { data: result, error } = await supabaseClient.auth.signUp({ email, password, options: { emailRedirectTo: redirectTo } });
+      if (error) throw error;
+      if (!result.session) showAuthMessage('Revisa tu correo para confirmar la cuenta e inicia sesión.');
+      else handleSignedIn(result.session.user);
+      return;
+    }
+
+    const { data: result, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    handleSignedIn(result.user);
+    if (mode === 'admin') void openAdmin();
+
+  } catch (error) {
+    const message = ({
+      email_not_confirmed: 'Confirma tu correo con el enlace que recibiste.',
+      email_address_not_authorized: 'Este correo todavía no está habilitado para el registro.',
+      over_email_send_rate_limit: 'Alcanzaste el límite temporal de correos. Intenta más tarde.',
+      weak_password: 'Elige una contraseña más larga y difícil de adivinar.',
+    })[error?.code];
+    showAuthMessage(message || (mode === 'signup' ? 'No pudimos enviar la confirmación. Revisa tu correo o intenta más tarde.' : mode === 'new-password' ? 'No se pudo guardar la contraseña. Revisa el enlace o elige otra.' : 'No pudimos iniciar sesión. Revisa el correo, la contraseña y tu conexión.'));
+  } finally {
+    authBusy = false;
+    submit.disabled = false;
+    submit.textContent = authViews[mode][2];
+    const passwordField = form.querySelector('#auth-password');
+    if (passwordField) passwordField.value = '';
+  }
+}
+
+async function signOutOfAccount() {
+  if (!supabaseClient) return;
+  if (cloudDirty) await saveCloudNow();
+  if (devicePushEnabled) await disablePushNotifications({ silent: true });
+  const { error } = await supabaseClient.auth.signOut({ scope: 'local' });
+  if (error) toast('No se pudo cerrar la sesión. Inténtalo de nuevo.', 'error');
 }
 
 function checkReminder() {
-  if (!state.settings.remindersEnabled || !state.settings.notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
-  const now = new Date();
-  const day = Math.min(Number(state.settings.reminderDay) || 1, 28);
-  const [hour, minute] = (state.settings.reminderTime || '19:00').split(':').map(Number);
-  const stamp = `${now.getFullYear()}-${now.getMonth() + 1}`;
-  if (now.getDate() === day && now.getHours() === hour && Math.abs(now.getMinutes() - minute) < 1 && state.lastReminder !== stamp) {
-    state.lastReminder = stamp;
-    persist();
-    sendNotice('Una pausa para tus finanzas', 'Revisa tus movimientos y actualiza tus presupuestos de este mes.');
-  }
+  if (devicePushEnabled || !state.settings.remindersEnabled || (!authUser && !guestMode)) return;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota', year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const clock = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const stamp = clock.year + '-' + clock.month;
+  if (clock.day !== String(state.settings.reminderDay) || clock.hour + ':' + clock.minute !== state.settings.reminderTime || state.lastReminder === stamp) return;
+  state.lastReminder = stamp;
+  persist();
+  const message = 'Revisa tus movimientos y presupuestos de este mes.';
+  toast(message, 'info');
+  void sendNotice('Recordatorio de Saldo', message);
 }
 
 function downloadFile(name, content, mime) {
@@ -490,7 +969,12 @@ function downloadFile(name, content, mime) {
 function exportCSV() {
   const headers = ['Fecha', 'Tipo', 'Concepto', 'Categoría', 'Valor COP', 'Nota'];
   const rows = transactionsIn(viewMonth).slice().sort((a, b) => a.date.localeCompare(b.date)).map(tx => [tx.date, tx.type === 'income' ? 'Ingreso' : 'Gasto', tx.title, tx.category, tx.amount, tx.note || '']);
-  const csv = [headers, ...rows].map(row => row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const cell = value => {
+    const raw = String(value ?? '');
+    const safe = typeof value !== 'number' && /^[\s]*[=+@-]/.test(raw) ? "'" + raw : raw;
+    return '"' + safe.replace(/"/g, '""') + '"';
+  };
+  const csv = [headers, ...rows].map(row => row.map(cell).join(',')).join('\r\n');
   downloadFile(`saldo-movimientos-${viewMonth}.csv`, `\uFEFF${csv}`, 'text/csv;charset=utf-8');
   toast(`Descargaste los movimientos de ${monthName(viewMonth)} en CSV.`);
 }
@@ -502,15 +986,18 @@ function exportJSON() {
 
 function importJSON(file) {
   if (!file) return;
+  if (file.size > 5_000_000) { toast('La copia pesa más de 5 MB.', 'error'); return; }
   const reader = new FileReader();
   reader.onload = () => {
     try {
       const parsed = JSON.parse(String(reader.result));
-      const imported = parsed.format === 'saldo-backup-v1' ? parsed.state : parsed;
+      const imported = parsed?.format === 'saldo-backup-v1' ? parsed.state : parsed;
       if (!imported || !Array.isArray(imported.transactions) || typeof imported.transactions !== 'object') throw new Error('Formato inválido');
-      if (!confirm('La importación reemplazará los datos guardados en este dispositivo. ¿Continuar?')) return;
-      const fresh = blankState();
-      state = { ...fresh, ...imported, profile: { ...fresh.profile, ...(imported.profile || {}) }, settings: { ...fresh.settings, ...(imported.settings || {}) } };
+      const normalized = normalizeState(imported);
+      if (normalized.transactions.length !== imported.transactions.length) throw new Error('Movimientos inválidos');
+      if (!confirm(authUser ? 'La importación reemplazará los datos de tu cuenta. ¿Continuar?' : 'La importación reemplazará los datos de este dispositivo. ¿Continuar?')) return;
+      state = normalized;
+      cloudReset = Boolean(authUser);
       persist(); render(); toast('Copia importada correctamente.');
     } catch {
       toast('No se pudo leer esa copia de seguridad.', 'error');
@@ -540,29 +1027,66 @@ function handleAction(button) {
   if (action === 'next-month') { viewMonth = shiftMonth(viewMonth, 1); render(); }
   if (action === 'filter-transactions') { transactionFilter = button.dataset.filter; render(); }
   if (action === 'edit-budget') { modal = { type: 'budget', category: button.dataset.category }; render(); window.setTimeout(() => root.querySelector('#budget-amount')?.focus(), 40); }
-  if (action === 'toggle-notifications') requestNotificationPermission();
+  if (action === 'toggle-notifications') {
+    state.settings.notificationsEnabled = !state.settings.notificationsEnabled;
+    persist(); render();
+  }
+  if (action === 'toggle-push') {
+    if (devicePushEnabled) void disablePushNotifications();
+    else void enablePushNotifications();
+  }
+  if (action === 'sync-now') {
+    cloudStatus = 'saving'; render();
+    void saveCloudNow().then(saved => {
+      render();
+      toast(saved ? 'Tus datos están sincronizados.' : 'No se pudo sincronizar. Conservamos los datos en este dispositivo.', saved ? 'success' : 'error');
+    });
+  }
+  if (action === 'auth-mode') changeAuthMode(button.dataset.mode);
+  if (action === 'guest' && !authBusy && !authUser) { guestMode = true; activeTab = 'home'; render(); }
+  if (action === 'import-local' && authUser) {
+    if (!confirm('¿Copiar los movimientos de invitado de este navegador a tu cuenta Saldo?')) return;
+    state = mergeStates(blankState(), readState(STORE_KEY), normalizeState(state));
+    persist(); render(); toast('Se copiaron los datos de invitado a tu cuenta.');
+  }
+  if (action === 'admin-open') void openAdmin();
+  if (action === 'admin-enroll') void enrollAdminFactor();
+  if (action === 'admin-return') { activeTab = 'account'; render(); }
+
+  if (action === 'sign-out') void signOutOfAccount();
   if (action === 'toggle-reminders') {
-    if (!state.settings.remindersEnabled && !state.settings.notificationsEnabled) {
-      requestNotificationPermission().then(ok => { if (ok) { state.settings.remindersEnabled = true; persist(); render(); } });
-    } else {
-      state.settings.remindersEnabled = !state.settings.remindersEnabled;
-      persist(); render();
-      toast(state.settings.remindersEnabled ? 'Recordatorio mensual activado.' : 'Recordatorio mensual pausado.');
-    }
+    state.settings.remindersEnabled = !state.settings.remindersEnabled;
+    persist(); render();
+    toast(state.settings.remindersEnabled ? 'Recordatorio mensual activado.' : 'Recordatorio mensual pausado.');
   }
   if (action === 'test-notification') {
-    if ('Notification' in window && Notification.permission === 'granted') {
-      sendNotice('Notificaciones de Saldo', 'Así se verá un aviso de presupuesto o recordatorio.');
-      toast('Aviso de prueba enviado.');
-    } else requestNotificationPermission();
+    if (devicePushEnabled) {
+      void sendPushNotification('test').then(result => {
+        toast(result.sent ? 'El proveedor aceptó el aviso de prueba.' : 'No hay un dispositivo push disponible.', result.sent ? 'success' : 'info');
+      }).catch(() => toast('No se pudo enviar el aviso push. Prueba más tarde.', 'error'));
+    } else {
+      void requestNotificationPermission().then(async granted => {
+        if (granted && await sendNotice('Notificaciones de Saldo', 'Así se verá un recordatorio.')) {
+          toast('Aviso del dispositivo enviado.');
+        } else toast('Este es un aviso dentro de Saldo.', 'info');
+      });
+    }
   }
   if (action === 'export-csv') exportCSV();
   if (action === 'export-json') exportJSON();
   if (action === 'import-json') root.querySelector('#import-file')?.click();
   if (action === 'clear-data') {
-    if (confirm('Esto borrará tus movimientos, presupuestos y perfil guardados en este navegador. Descarga una copia primero si quieres conservarlos.')) {
-      state = blankState(); persist(); modal = null; render(); toast('Se borraron los datos locales.');
-    }
+    const message = authUser
+      ? 'Esto borra tus movimientos, presupuestos y preferencias de la cuenta. Descarga una copia antes si quieres conservarlos. ¿Continuar?'
+      : 'Esto borra los datos guardados en este navegador. ¿Continuar?';
+    if (!confirm(message)) return;
+    state = blankState();
+    cloudReset = Boolean(authUser);
+    persist();
+    render();
+    if (authUser) {
+      void saveCloudNow().then(saved => toast(saved ? 'Datos borrados de tu cuenta.' : 'El borrado de la nube queda pendiente de conexión.', saved ? 'success' : 'info'));
+    } else toast('Datos borrados de este navegador.');
   }
   if (action === 'install-help') {
     toast(/iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'En Safari: Compartir y luego Añadir a pantalla de inicio.' : 'En Chrome: abre el menú y elige Instalar aplicación o Añadir a pantalla de inicio.', 'info');
@@ -584,7 +1108,10 @@ function installApp() {
 
 root.addEventListener('click', event => {
   const tab = event.target.closest('[data-tab]');
-  if (tab) { activeTab = tab.dataset.tab; render(); return; }
+  if (tab) {
+    if (activeTab !== tab.dataset.tab) { activeTab = tab.dataset.tab; render(); window.scrollTo(0, 0); }
+    return;
+  }
   const button = event.target.closest('[data-action]');
   if (!button) return;
   if (button.dataset.action === 'backdrop-close' && event.target !== button) return;
@@ -593,12 +1120,18 @@ root.addEventListener('click', event => {
 });
 
 root.addEventListener('submit', event => {
+  if (event.target.id === 'auth-form') { event.preventDefault(); void submitAuthForm(event.target); }
+  if (event.target.id === 'admin-code-form') { event.preventDefault(); void verifyAdminCode(event.target); }
   if (event.target.id === 'transaction-form') { event.preventDefault(); saveTransaction(event.target); }
   if (event.target.id === 'budget-form') {
     event.preventDefault();
     const data = new FormData(event.target);
     const category = String(data.get('category'));
-    const amount = Math.max(0, Number(data.get('amount')) || 0);
+    const amount = Math.round(Number(data.get('amount')) || 0);
+    if (!CATEGORIES.expense.includes(category) || (amount !== 0 && !positiveAmount(amount))) {
+      toast('Revisa el valor del presupuesto.', 'error');
+      return;
+    }
     if (!state.budgets[viewMonth]) state.budgets[viewMonth] = {};
     if (amount === 0) delete state.budgets[viewMonth][category];
     else state.budgets[viewMonth][category] = Math.round(amount);
@@ -607,7 +1140,7 @@ root.addEventListener('submit', event => {
   if (event.target.id === 'profile-form') {
     event.preventDefault();
     state.profile.name = String(new FormData(event.target).get('name') || '').trim();
-    persist(); render(); toast('Perfil guardado en este dispositivo.');
+    persist(); render(); toast('Perfil guardado.');
   }
 });
 
@@ -622,7 +1155,7 @@ root.addEventListener('input', event => {
 root.addEventListener('change', event => {
   if (event.target.id === 'tx-category' && modal?.type === 'transaction') modal.category = event.target.value;
   if (event.target.id === 'reminder-day') { state.settings.reminderDay = event.target.value; persist(); }
-  if (event.target.id === 'reminder-time') { state.settings.reminderTime = event.target.value; persist(); }
+  if (event.target.id === 'reminder-time' && event.target.value) { state.settings.reminderTime = event.target.value; persist(); }
   if (event.target.id === 'import-file') importJSON(event.target.files?.[0]);
 });
 
@@ -642,5 +1175,7 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 }
 
 render();
-checkReminder();
+initializeCloud();
 window.setInterval(checkReminder, 30000);
+window.addEventListener('online', () => void saveCloudNow());
+document.addEventListener('visibilitychange', () => { if (!document.hidden && authUser) void saveCloudNow(); });

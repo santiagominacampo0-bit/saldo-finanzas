@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Saldo</string>
+    <string name="browser_needed">Instala o activa un navegador para abrir Saldo.</string>
+    <string name="retry">Abrir Saldo</string>
+    <color name="saldo_background">#F3F7F3</color>
+    <color name="saldo_primary">#164534</color>
+    <style name="Theme.Saldo" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">@color/saldo_primary</item>
+        <item name="android:windowBackground">@color/saldo_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:statusBarColor">@color/saldo_background</item>
+        <item name="android:navigationBarColor">@color/saldo_background</item>
+    </style>
+</resources>
