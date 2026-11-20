@@ -1,13 +1,13 @@
-const CACHE_NAME = 'saldo-static-v6.1';
+const CACHE_NAME = 'saldo-static-v7';
 const BASE = self.registration.scope;
 const INDEX = new URL('./index.html', BASE).href;
 const FILES = new Set([
-  './', './index.html', './styles.css?v=6', './vendor/supabase.js?v=6',
-  './saldo-calendar.js?v=6', './saldo-rules.js?v=6', './saldo-extras.js?v=6',
-  './saldo-planning.js?v=6', './saldo-recurrence.js?v=6', './saldo-tools.js?v=6',
-  './supabase-config.js?v=6', './saldo-state.js?v=6', './app.js?v=6.1', './manifest.webmanifest',
-  './icons/saldo.svg', './icons/icon-192.png', './icons/icon-512.png',
-  './icons/apple-touch-icon.png', './privacy.html',
+  './', './index.html', './styles.css?v=7', './vendor/supabase.js?v=7',
+  './saldo-theme.js?v=7', './saldo-calendar.js?v=7', './saldo-rules.js?v=7', './saldo-extras.js?v=7',
+  './saldo-planning.js?v=7', './saldo-recurrence.js?v=7', './saldo-tools.js?v=7',
+  './supabase-config.js?v=7', './saldo-state.js?v=7', './app.js?v=7', './manifest.webmanifest',
+  './icons/saldo.svg?v=7', './icons/icon-maskable-512.png?v=7', './icons/notification-badge.png?v=7', './icons/icon-192.png?v=7', './icons/icon-512.png?v=7',
+  './icons/apple-touch-icon.png?v=7', './privacy.html',
 ].map(path => new URL(path, BASE).href));
 
 self.addEventListener('install', event => {
@@ -42,8 +42,8 @@ self.addEventListener('push', event => {
   try { payload = event.data?.json() || {}; } catch { /* Use default content. */ }
   event.waitUntil(self.registration.showNotification(payload.title || 'Saldo', {
     body: payload.body || 'Abre Saldo para revisar tus finanzas.',
-    icon: new URL('./icons/icon-192.png', BASE).href,
-    badge: new URL('./icons/icon-192.png', BASE).href,
+    icon: new URL('./icons/icon-192.png?v=7', BASE).href,
+    badge: new URL('./icons/notification-badge.png?v=7', BASE).href,
     data: { url: BASE },
     tag: payload.tag || 'saldo-notification',
   }));

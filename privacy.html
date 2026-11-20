@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f7f8f5" />
     <title>Privacidad — Saldo</title>
-    <link rel="icon" href="./icons/saldo.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="./styles.css?v=6" />
+    <link rel="icon" href="./icons/saldo.svg?v=7" type="image/svg+xml" />
+    <script src="./saldo-theme.js?v=7"></script>
+    <link rel="stylesheet" href="./styles.css?v=7" />
     <style>
       .privacy-page { max-width: 760px; margin: 0 auto; padding: 34px 20px 70px; }
       .privacy-page .brand { padding: 0 0 28px; }
@@ -14,21 +15,21 @@
       .privacy-document h1 { margin: 0; font: 800 27px var(--display); letter-spacing: -.8px; }
       .privacy-document .updated { color: var(--muted); font-size: 11px; }
       .privacy-document h2 { margin: 23px 0 7px; font: 700 15px var(--display); }
-      .privacy-document p, .privacy-document li { color: #59655e; font-size: 12px; line-height: 1.7; }
+      .privacy-document p, .privacy-document li { color: var(--muted); font-size: 12px; line-height: 1.7; }
       .privacy-document ul { padding-left: 20px; }
       @media(max-width:520px) { .privacy-page { padding: 22px 13px 50px; } .privacy-document { padding: 20px; } }
     </style>
   </head>
   <body>
     <main class="privacy-page">
-      <a class="brand" href="./"><span class="brand-mark"><img src="./icons/saldo.svg" alt="" width="36" height="36" /></span><span>saldo</span></a>
+      <a class="brand" href="./"><span class="brand-mark"><img src="./icons/saldo.svg?v=7" alt="" width="36" height="36" /></span><span>saldo</span></a>
       <article class="privacy-document">
         <p class="updated">Actualizada el 20 de noviembre de 2026</p>
         <h1>Política de privacidad</h1>
-        <p>Saldo permite registrar manualmente ingresos, gastos, presupuestos, bolsillos, metas, recurrentes, reglas de categorías y preferencias. No se conecta a bancos, no mueve dinero y no procesa pagos.</p>
+        <p>Saldo permite registrar manualmente ingresos, gastos, presupuestos, bolsillos, metas, vencimientos, reglas de categorías y preferencias. No se conecta a bancos, no mueve dinero y no procesa pagos. La comparación de un bolsillo con Nequi utiliza el saldo que tú introduces.</p>
         <h2>Datos que guarda Saldo</h2>
-        <p>Sin iniciar sesión, el perfil, los movimientos, presupuestos, bolsillos, metas, recurrentes, reglas de categorías y preferencias se guardan en el almacenamiento local de este navegador. Al crear una cuenta, el correo y la contraseña se usan mediante Supabase Auth; los movimientos, perfil y preferencias se sincronizan con Supabase para que puedas recuperar la información en tus dispositivos.</p>
-        <p>Al activar notificaciones push, Supabase guarda la dirección de suscripción del dispositivo y las claves técnicas necesarias para enviar avisos. El contenido financiero no se incluye en las notificaciones.</p>
+        <p>Sin iniciar sesión, el perfil, los movimientos, presupuestos, bolsillos, metas, vencimientos, reglas de categorías y preferencias se guardan en el almacenamiento local de este navegador. Al crear una cuenta, el correo y la contraseña se usan mediante Supabase Auth; los movimientos, perfil y preferencias se sincronizan con Supabase para que puedas recuperar la información en tus dispositivos.</p>
+        <p>El tema visual se guarda por dispositivo. Al activar notificaciones push, Supabase guarda la dirección de suscripción del dispositivo y las claves técnicas necesarias para enviar avisos. El contenido financiero no se incluye en las notificaciones.</p>
         <h2>Servicios que intervienen</h2>
         <p>GitHub Pages entrega los archivos públicos de la aplicación. Supabase proporciona autenticación, almacenamiento de datos y una función que envía avisos push a través del servicio de notificaciones del navegador o sistema operativo. Estos servicios reciben la información técnica necesaria para operar sus funciones. Revisa las políticas y disponibilidad de esos proveedores antes de usar la sincronización.</p>
         <h2>Control y eliminación</h2>

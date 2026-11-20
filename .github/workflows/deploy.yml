@@ -29,7 +29,7 @@ jobs:
       - name: Prepare site
         run: |
           mkdir -p _site/vendor
-          cp index.html privacy.html manifest.webmanifest styles.css app.js saldo-state.js saldo-planning.js saldo-recurrence.js saldo-calendar.js saldo-rules.js saldo-extras.js saldo-tools.js supabase-config.js sw.js _site/
+          cp index.html privacy.html manifest.webmanifest styles.css saldo-theme.js app.js saldo-state.js saldo-planning.js saldo-recurrence.js saldo-calendar.js saldo-rules.js saldo-extras.js saldo-tools.js supabase-config.js sw.js _site/
           cp -r icons _site/
           cp vendor/supabase.js vendor/SUPABASE_JS_LICENSE _site/vendor/
       - name: Upload site

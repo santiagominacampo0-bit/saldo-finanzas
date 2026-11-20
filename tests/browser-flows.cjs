@@ -43,7 +43,7 @@ async function main() {
   page.setDefaultTimeout(9000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  const fake = { row: null, requests: [], signedIn: false, owner: false, verified: false };
+  const fake = { row: null, requests: [], signedIn: false, owner: false, verified: false, staleNotices: false };
   await browserContext.route(api + '/**', async route => {
     const request = route.request();
     const target = new URL(request.url());
@@ -74,9 +74,20 @@ async function main() {
       return json([]);
     }
     if (target.pathname === '/rest/v1/rpc/saldo_admin_access') return json({ allowed: fake.owner, verified: fake.verified });
-    if (target.pathname === '/rest/v1/rpc/saldo_admin_summary') return json({ accounts: 1, sync_accounts: 1, push_devices: 0,
-      notification_check: { last_started_at: new Date(Date.now() - 2000).toISOString(), last_finished_at: new Date().toISOString(), last_failure_at: new Date().toISOString(), provider_rejections: 1, accepted: 2 },
-    });
+    if (target.pathname === '/rest/v1/rpc/saldo_admin_summary') {
+      const observed = Date.now();
+      const start = observed - (fake.staleNotices ? 21 * 60 * 1000 : 2000);
+      return json({
+        accounts: 5, sync_accounts: 4, push_devices: 2, checked_at: new Date(observed).toISOString(),
+        activity: { confirmed_last_7_days: 3, saved_last_7_days: 1, last_saved_at: new Date(observed - 1000).toISOString() },
+        notification_check: {
+          last_started_at: new Date(start).toISOString(), last_finished_at: new Date(start + 1000).toISOString(),
+          last_failure_at: new Date(start + 1000).toISOString(), last_accepted_at: new Date(start + 1000).toISOString(),
+          monthly_claims: 2, provider_rejections: 1, accepted: 2, transient_failures: 1, timed_out: 1,
+          processing_errors: 0, discarded_subscriptions: 0,
+        },
+      });
+    }
     if (target.pathname === '/auth/v1/user') return json({ ...user, factors: [] });
     if (target.pathname === '/auth/v1/factors' && method === 'POST') return json({
       id: 'test-factor', type: 'totp', totp: {
@@ -189,6 +200,17 @@ async function main() {
     check(fake.verified, 'verifica segundo factor en el flujo simulado y abre indicadores');
     check(await page.getByRole('heading',{name:'Estado de los avisos'}).isVisible(), 'el dueño ve el estado del programador');
     check(await page.getByText('El último chequeo tuvo fallos',{exact:true}).isVisible(), 'el dueño ve fallos de proveedor');
+    const ownerMetric = label => page.locator('.owner-metrics > div')
+      .filter({ has: page.getByText(label, { exact: true }) }).locator('dd');
+    check(await ownerMetric('Cuentas confirmadas en los últimos 7 días').textContent() === '3', 'el dueño ve altas confirmadas recientes');
+    check(await ownerMetric('Cuentas con guardados en los últimos 7 días').textContent() === '1', 'el dueño ve la actividad reciente de guardado');
+    check((await ownerMetric('Último guardado en la nube').textContent()) !== 'Sin registro', 'el dueño ve el último guardado general');
+    check(await ownerMetric('Rechazos del proveedor').textContent() === '1', 'el dueño ve el desglose de rechazos push');
+    check(await ownerMetric('Errores de procesamiento').textContent() === '0', 'un conteo de cero se muestra como cero');
+    fake.staleNotices = true;
+    await page.getByRole('button', { name: 'Actualizar indicadores' }).click();
+    await page.getByText('Hace más de 20 minutos sin un chequeo nuevo', { exact: true }).waitFor();
+    check(fake.requests.filter(call => call === 'POST /rest/v1/rpc/saldo_admin_summary').length === 2, 'el dueño puede actualizar indicadores y detectar retrasos');
     check(await page.locator('#owner-secret').count() === 0, 'la clave ya no se muestra después de verificar');
     check(errors.length === 0, 'ningún error JavaScript en los flujos (' + errors.join(', ') + ')');
     console.log(passed + ' comprobaciones del flujo completadas.');

@@ -41,6 +41,7 @@ const ICONS = {
 
 const root = document.getElementById('app');
 let storageKey = STORE_KEY;
+let localWriteFailed = false;
 let state = readState(STORE_KEY);
 let activeTab = 'home';
 let plannerView = 'budgets';
@@ -65,6 +66,7 @@ let cloudSaveChain = Promise.resolve();
 let cloudSaveTimer = null;
 let cloudBase = null;
 let cloudDirty = false;
+let syncConflicts = [];
 let cloudReset = false;
 let cloudEpoch = 0;
 let authBooting = Boolean(supabaseClient);
@@ -77,6 +79,7 @@ let lastView = '';
 let adminStatus = null;
 let adminFactor = null;
 let adminSummary = null;
+let adminLoad = 0;
 
 const blankState = () => normalizeState();
 function readLocal(key) {
@@ -90,8 +93,8 @@ function readState(key) {
 
 function storeState() {
   const payload = authUser ? { state, base: cloudBase, dirty: cloudDirty, reset: cloudReset, lastSave: cloudSavedAt } : state;
-  try { localStorage.setItem(storageKey, JSON.stringify(payload)); return true; }
-  catch { return false; }
+  try { localStorage.setItem(storageKey, JSON.stringify(payload)); localWriteFailed = false; return true; }
+  catch { localWriteFailed = true; return false; }
 }
 
 function persist({ cloud = true } = {}) {
@@ -117,6 +120,12 @@ async function synchronizeUser(userId, epoch) {
       const remote = normalizeState(row?.payload);
       const local = normalizeState(state);
       const resetting = cloudReset;
+      syncConflicts = cloudDirty && !resetting && cloudBase ? window.SaldoState.transactionConflicts(cloudBase, local, remote) : [];
+      if (syncConflicts.length) {
+        cloudStatus = 'conflict';
+        renderAfterSync();
+        return false;
+      }
       const next = resetting ? local : cloudDirty ? mergeStates(cloudBase || blankState(), local, remote) : remote;
 
       let savedAt = row?.updated_at || '';
@@ -187,10 +196,12 @@ function queueCloudSave() {
 function handleSignedIn(user) {
   if (!user) return;
   if (authUser?.id === user.id) { authUser = user; return; }
+  syncConflicts = [];
   cloudEpoch += 1;
   authUser = user;
   guestMode = false;
   cloudStatus = 'loading';
+  localWriteFailed = false;
   storageKey = STORE_KEY + ':user:' + user.id;
   const stored = readLocal(storageKey);
   state = normalizeState(stored?.state ?? stored);
@@ -214,6 +225,7 @@ function handleSignedIn(user) {
 
 function handleSignedOut() {
   window.clearTimeout(cloudSaveTimer);
+  syncConflicts = [];
   cloudEpoch += 1;
   authUser = null;
   devicePushEnabled = false;
@@ -234,6 +246,7 @@ function handleSignedOut() {
   authMode = 'signin';
   authBusy = false;
   adminStatus = adminFactor = adminSummary = null;
+  localWriteFailed = false;
   storageKey = STORE_KEY;
   state = readState(STORE_KEY);
   authMessage = '';
@@ -292,8 +305,9 @@ function monthName(month, year = true) {
   return new Intl.DateTimeFormat('es-CO', { month: 'long', ...(year ? { year: 'numeric' } : {}) }).format(monthDate(month));
 }
 
+const copFormat = new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 });
 function formatMoney(value) {
-  return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(Number(value) || 0);
+  return copFormat.format(Number(value) || 0);
 }
 
 function formatDate(value, options = { day: 'numeric', month: 'short' }) {
@@ -315,10 +329,6 @@ function transactionsIn(month, type) {
 
 function totalFor(month, type) {
   return transactionsIn(month, type).reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
-}
-
-function lifetimeBalance() {
-  return state.transactions.reduce((sum, tx) => sum + (tx.type === 'income' ? 1 : -1) * Number(tx.amount || 0), 0);
 }
 
 function monthBudgets(month = viewMonth) {
@@ -363,7 +373,7 @@ function shell() {
   const profileCaption = authUser ? cloudStatusLabel() : 'Este dispositivo';
   const privacyTitle = authUser ? 'Cuenta protegida' : 'Tu información es privada';
   const privacyCopy = authUser ? 'Tus datos se guardan en este dispositivo y se sincronizan con tu cuenta.' : 'Los movimientos permanecen en este dispositivo hasta que inicies sesión.';
-  const dateLine = new Intl.DateTimeFormat('es-CO', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
+  const dateLine = new Intl.DateTimeFormat('es-CO', { timeZone: 'America/Bogota', weekday: 'long', day: 'numeric', month: 'long' }).format(new Date());
   return `<div class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">${brandMark()}</span><span class="brand-word">saldo</span></div>
@@ -382,6 +392,7 @@ function shell() {
           <button class="primary-button" data-action="new-transaction">${svg('plus')}<span>Nuevo movimiento</span></button>
         </div>
       </header>
+      ${localWriteFailed ? '<section role="alert" class="panel panel-pad"><strong>No se pudo guardar en este dispositivo.</strong><p>Descarga una copia de tus cambios antes de cerrar Saldo.</p><button class="secondary-button" data-action="export-json">Descargar copia</button> <button class="text-button" data-action="retry-local">Reintentar guardado</button></section>' : ''}
       <section class="content ${lastView !== activeTab ? 'view-arrive' : ''}">${renderView()}</section>
     </main>
     <nav class="mobile-nav" aria-label="Principal">${NAV.map(item => navButton(item, true)).join('')}</nav>
@@ -405,17 +416,25 @@ function renderHome() {
   const incomes = totalFor(viewMonth, 'income');
   const expenses = totalFor(viewMonth, 'expense');
   const balance = incomes - expenses;
-  const accumulated = lifetimeBalance();
+  const today = todayString();
   const expensesPct = percent(expenses, incomes);
-  const recent = state.transactions.filter(tx => tx.date?.slice(0, 7) === viewMonth).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 4);
+  const activity = [
+    ...transactionsIn(viewMonth).map(tx => ({ date: tx.date, tx })),
+    ...Object.values(state.transfers).filter(tr => tr.date.startsWith(viewMonth)).map(tr => ({ date: tr.date, tr })),
+  ].sort((a,b) => b.date.localeCompare(a.date));
+  const todayCount = activity.filter(item => item.date === today).length;
   const budgets = monthBudgets();
   const spent = spentByCategory();
   const visibleBudgets = Object.entries(budgets).filter(([, value]) => Number(value) > 0).slice(0, 4);
-  return `<section class="hero-grid">
+  const mainGoal = Object.values(state.goals).find(goal => goal.saved < goal.target);
+  return `<section class="panel panel-pad home-activity">
+    <div class="section-heading"><div><h2>Actividad reciente</h2><p>${viewMonth === today.slice(0,7) ? todayCount + (todayCount === 1 ? ' registro hoy' : ' registros hoy') : escapeHTML(monthName(viewMonth))}</p></div><button class="text-button" data-tab="movements">Ver movimientos</button></div>
+    ${activity.length ? activity.slice(0,3).map(item => item.tx ? transactionRow(item.tx) : `<div class="transaction-row"><span class="transaction-symbol">${svg('arrows')}</span><span class="transaction-copy"><span class="transaction-title">${escapeHTML(walletLabel(item.tr.fromId))} → ${escapeHTML(walletLabel(item.tr.toId))}</span><span class="transaction-meta">Transferencia · ${formatDate(item.date)}</span></span><strong>${formatMoney(item.tr.amount)}</strong></div>`).join('') : emptyTransactions('Aún no hay actividad este mes','Registra tu primer ingreso o gasto para empezar.', true)}
+  </section><section class="hero-grid">
     <article class="balance-card">
       <div class="balance-top"><span class="balance-label">Balance del mes</span><span class="private-pill">${svg('lock')} <span ${authUser ? 'data-cloud-status' : ''}>${authUser ? cloudStatusLabel() : 'Solo en este dispositivo'}</span></span></div>
       <div class="balance-amount">${formatMoney(balance)}</div>
-      <div class="balance-foot"><span>Acumulado de movimientos: ${formatMoney(accumulated)}</span></div>
+      <div class="balance-foot"><span>Ingresos menos gastos de ${escapeHTML(monthName(viewMonth))}</span></div>
     </article>
     <div class="month-summary">
       <article class="stat-card"><div class="stat-copy"><div class="stat-label">Ingresos del mes</div><div class="stat-value">${formatMoney(incomes)}</div><div class="stat-meta">${transactionsIn(viewMonth, 'income').length} ${transactionsIn(viewMonth, 'income').length === 1 ? 'registro' : 'registros'}</div></div><span class="stat-icon income">${svg('income')}</span></article>
@@ -425,18 +444,15 @@ function renderHome() {
   ${renderForecast()}
   <section class="section-grid">
     <article class="panel panel-pad">
-      <div class="section-heading"><div><h2>Próximos vencimientos</h2><p>Pagos e ingresos que programaste.</p></div><button class="text-button" data-action="planner-view" data-view="recurring">Ver recurrentes</button></div>
-      ${renderRecurringPreview()}
+      <div class="section-heading"><div><h2>Metas de ahorro</h2></div><button class="text-button" data-action="planner-view" data-view="goals">Ver metas</button></div>
+      ${mainGoal ? `<h3>${escapeHTML(mainGoal.name)}</h3><p>${formatMoney(mainGoal.saved)} de ${formatMoney(mainGoal.target)}</p><progress class="goal-progress" aria-label="Avance de la meta" max="100" value="${window.SaldoPlanning.goalProgress(mainGoal).barPercent}"></progress>` : `<p>${Object.keys(state.goals).length ? 'Alcanzaste tus metas de ahorro.' : 'Define cuánto quieres ahorrar y registra tus aportes.'}</p>`}
     </article>
     <article class="panel panel-pad">
       <div class="section-heading"><div><h2>Presupuestos</h2><p>${escapeHTML(monthName(viewMonth))}</p></div><button class="text-button" data-tab="budgets">Ver todos</button></div>
       ${visibleBudgets.length ? `<div class="budget-mini">${visibleBudgets.map(([category, amount]) => budgetRow(category, amount, spent[category] || 0)).join('')}</div>` : `<div class="empty-state"><span class="empty-icon">${svg('wallet')}</span><h3>Empieza con un presupuesto</h3><p>Define límites por categoría para entender mejor tus gastos.</p><button class="secondary-button" data-tab="budgets">Crear presupuesto</button></div>`}
     </article>
   </section>
-  <section class="panel panel-pad activity-panel">
-    <div class="section-heading"><div><h2>Movimientos recientes</h2><p>${escapeHTML(monthName(viewMonth))}</p></div><button class="text-button" data-tab="movements">Ver movimientos</button></div>
-    ${recent.length ? `<div class="activity-list">${recent.map(transactionRow).join('')}</div><div class="activity-footer"><button class="text-button" data-action="new-transaction">+ Añadir movimiento</button></div>` : emptyTransactions('Aún no hay movimientos este mes', 'Agrega un ingreso o gasto para empezar a ver tu resumen.', true)}
-  </section>`;
+  <section class="panel panel-pad"><div class="section-heading"><div><h2>Gastos del mes</h2><p>${Object.keys(spent).length ? 'Mayor categoría · ' + escapeHTML(Object.keys(spent).sort((a,b)=>spent[b]-spent[a])[0]) : 'Los gastos registrados aparecerán aquí.'}</p></div><button class="text-button" data-tab="reports">Ver reportes</button></div>${incomes ? `<p>${expensesPct}% de los ingresos destinado a gastos</p><progress aria-label="Gastos frente a ingresos" max="100" value="${Math.min(100,expensesPct)}"></progress>` : ''}</section>`;
 }
 
 function budgetRow(category, amount, used) {
@@ -446,7 +462,7 @@ function budgetRow(category, amount, used) {
 
 function transactionRow(tx, full = false) {
   const isIncome = tx.type === 'income';
-  const details = [tx.merchant, tx.walletId ? walletLabel(tx.walletId) : '', tx.note || (!full ? tx.category : '')].filter(Boolean).join(' · ');
+  const details = [formatDate(tx.date), tx.merchant, tx.walletId ? walletLabel(tx.walletId) : '', tx.note || (!full ? tx.category : '')].filter(Boolean).join(' · ');
   return `<div class="transaction-row">
     <span class="transaction-symbol ${isIncome ? 'income' : ''}">${svg(categoryIcon(tx.category))}</span>
     <span class="transaction-copy"><span class="transaction-title">${escapeHTML(tx.title || tx.category)}</span><span class="transaction-meta">${escapeHTML(details)}</span></span>
@@ -493,14 +509,25 @@ function renderReports() {
   const expense = totalFor(viewMonth, 'expense');
   const net = income - expense;
   const months = Array.from({ length: 6 }, (_, index) => shiftMonth(viewMonth, index - 5));
-  const max = Math.max(1, ...months.flatMap(month => [totalFor(month, 'income'), totalFor(month, 'expense')]));
-  const hasSixMonthData = months.some(month => state.transactions.some(tx => tx.date?.slice(0, 7) === month));
+  const totals = Object.fromEntries(months.map(month => [month, { income: 0, expense: 0 }]));
+  const today = todayString();
+  let spentThroughToday = 0;
+  for (const tx of state.transactions) {
+    const month = tx.date.slice(0, 7);
+    if (totals[month]) totals[month][tx.type] += tx.amount;
+    if (month === viewMonth && tx.type === 'expense' && tx.date <= today) spentThroughToday += tx.amount;
+  }
+  const max = Math.max(1, ...Object.values(totals).flatMap(row => [row.income, row.expense]));
+  const hasSixMonthData = Object.values(totals).some(row => row.income || row.expense);
+  const days = viewMonth === today.slice(0, 7) ? Number(today.slice(-2)) : new Date(Number(viewMonth.slice(0,4)), Number(viewMonth.slice(5)), 0).getDate();
+  const previous = totals[months.at(-2)];
   const byCategory = spentByCategory();
   const categories = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
   return `<div class="page-title-row"><div><h2>Panorama de tus finanzas</h2><p>Resumen de ${escapeHTML(monthName(viewMonth))} según los movimientos que registraste.</p></div></div>
     <div class="report-kpis"><article class="report-kpi"><span>Ingresos</span><strong class="positive">${formatMoney(income)}</strong></article><article class="report-kpi"><span>Gastos</span><strong>${formatMoney(expense)}</strong></article><article class="report-kpi"><span>Balance del mes</span><strong class="${net >= 0 ? 'positive' : 'negative'}">${formatMoney(net)}</strong></article></div>
+    <div class="report-kpis"><article class="report-kpi"><span>Gasto diario promedio</span><strong>${viewMonth <= today.slice(0,7) ? formatMoney(spentThroughToday / days) : 'Sin días transcurridos'}</strong></article><article class="report-kpi"><span>Balance del mes anterior</span><strong>${formatMoney(previous.income - previous.expense)}</strong></article></div>
     <div class="report-grid"><article class="panel panel-pad"><div class="section-heading"><div><h2>Ingresos y gastos</h2><p>Últimos seis meses registrados en COP</p></div></div>${hasSixMonthData ? `<div class="report-chart" role="img" aria-label="Comparación de ingresos y gastos mensuales">${months.map(month => {
-      const inc = totalFor(month, 'income'); const exp = totalFor(month, 'expense');
+      const { income: inc, expense: exp } = totals[month];
       const hi = inc ? Math.max(5, Math.round(inc / max * 164)) : 2;
       const he = exp ? Math.max(5, Math.round(exp / max * 164)) : 2;
       return `<div class="report-bar-group"><div class="report-bars"><span class="report-bar income" style="height:${hi}px" title="Ingresos ${formatMoney(inc)}"></span><span class="report-bar expense" style="height:${he}px" title="Gastos ${formatMoney(exp)}"></span></div><span class="report-month">${escapeHTML(monthName(month, false).slice(0, 3))}</span></div>`;
@@ -509,13 +536,31 @@ function renderReports() {
 }
 
 function brandMark() {
-  return '<img src="./icons/saldo.svg" alt="" width="36" height="36" />';
+  return '<img src="./icons/saldo.svg?v=7" alt="" width="36" height="36" />';
+}
+
+function renderSyncChoices() {
+  const details = tx => tx ? [tx.title, formatMoney(tx.amount), tx.date, tx.type === 'income' ? 'Ingreso' : 'Gasto', tx.category, walletLabel(tx.walletId), tx.merchant, tx.note].filter(Boolean).join(' · ') : 'Movimiento eliminado';
+  return syncConflicts.map(item => `<section class="form-section"><h3>Dos cambios en el mismo movimiento</h3>
+    <p>Elige qué versión guardar en tu cuenta.</p>${['device','cloud'].map(source => `<p>${source === 'device' ? 'Este dispositivo' : 'Nube'} · ${escapeHTML(details(item[source]))}</p>
+    <button class="secondary-button" data-action="resolve-sync" data-source="${source}" data-id="${escapeHTML(item.id)}">${source === 'device' ? 'Usar este dispositivo' : 'Usar la nube'}</button>`).join('')}</section>`).join('');
+}
+
+function resolveSync(button) {
+  const item = syncConflicts.find(entry => entry.id === button.dataset.id);
+  if (!authUser || !item || !cloudBase) return;
+  const replace = (rows, tx) => rows.filter(row => row.id !== item.id).concat(tx ? [tx] : []);
+  cloudBase.transactions = replace(cloudBase.transactions, item.cloud);
+  if (button.dataset.source === 'cloud') state.transactions = replace(state.transactions, item.cloud);
+  syncConflicts = syncConflicts.filter(entry => entry.id !== item.id);
+  persist();
+  render();
 }
 
 function cloudStatusLabel() {
   return ({
     loading: 'Conectando…', pending: 'Cambios pendientes', saving: 'Sincronizando…',
-    synced: 'Sincronizado', error: 'Sin conexión con la nube', local: 'Solo en este dispositivo',
+    conflict: 'Revisa los cambios en Cuenta', synced: 'Sincronizado', error: 'Sin conexión con la nube', local: 'Solo en este dispositivo',
     'not-configured': 'Conexión no configurada',
   })[cloudStatus];
 }
@@ -589,19 +634,24 @@ async function checkAdminAccess() {
 }
 
 async function openAdmin() {
+  const ownerId = authUser?.id;
+  if (!ownerId) return;
+  const load = ++adminLoad;
+  const viewingPanel = () => activeTab === 'admin' && authUser?.id === ownerId && adminLoad === load;
+
   activeTab = 'admin';
   adminStatus = adminFactor = adminSummary = null;
   render();
   const access = await checkAdminAccess();
-  if (activeTab !== 'admin' || !authUser) return;
+  if (!viewingPanel()) return;
   if (!access) { adminStatus = { unavailable: true }; render(); return; }
   if (access.allowed && access.verified) {
     const { data } = await supabaseClient.rpc('saldo_admin_summary');
-    if (activeTab !== 'admin' || !authUser) return;
+    if (!viewingPanel()) return;
     adminSummary = data || { unavailable: true };
   } else if (access.allowed) {
     const { data } = await supabaseClient.auth.mfa.listFactors();
-    if (activeTab !== 'admin' || !authUser) return;
+    if (!viewingPanel()) return;
     adminFactor = data?.totp?.find(factor => factor.status === 'verified') || null;
   }
   render();
@@ -683,22 +733,19 @@ async function verifyAdminCode(form) {
 
 function renderAdmin() {
   let content = '<p role="status">Verificando acceso…</p>';
-  if (adminStatus?.unavailable) content = '<p>No pudimos consultar permisos. Vuelve a entrar para reintentar.</p>';
+  if (adminStatus?.unavailable) content = '<p role="status">No pudimos consultar los permisos.</p>';
   else if (adminStatus && !adminStatus.allowed) content = '<p>Esta cuenta no tiene acceso al panel administrativo.</p>';
   else if (adminStatus?.allowed && !adminStatus.verified) {
     const enroll = adminFactor?.secret ? renderOwnerSetup() : '<p>Abre tu app de códigos y busca Saldo. Escribe el código vigente de seis dígitos.</p>';
     content = adminFactor
       ? `${enroll}<form id="admin-code-form"><div class="field"><label for="admin-code">Código de seis dígitos</label><input id="admin-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required /></div><div class="account-actions"><button class="primary-button" type="submit">Verificar código</button></div></form>`
       : '<p>El panel pide un código adicional. Una app de autenticación, como Google Authenticator, genera ese código en tu teléfono. Vincúlala una sola vez.</p><button class="primary-button" data-action="admin-enroll">Vincular autenticador</button>';
-  } else if (adminSummary?.unavailable) content = '<p>No pudimos cargar los indicadores.</p>';
-  else if (adminSummary) {
-    content = `<div class="report-kpis">
-      <article class="report-kpi"><span>Cuentas confirmadas</span><strong>${Number(adminSummary.accounts) || 0}</strong></article>
-      <article class="report-kpi"><span>Cuentas con datos</span><strong>${Number(adminSummary.sync_accounts) || 0}</strong></article>
-      <article class="report-kpi"><span>Dispositivos con push</span><strong>${Number(adminSummary.push_devices) || 0}</strong></article>
-    </div>${renderNotificationCheck(adminSummary.notification_check)}`;
-  }
-  return `<section class="panel panel-pad"><div class="section-heading"><div><h2>Panel del dueño</h2><p>Indicadores generales de Saldo</p></div></div>
+  } else if (adminSummary?.unavailable) content = '<p role="status">No pudimos cargar los indicadores.</p>';
+  else if (adminSummary) content = renderOwnerDiagnostics(adminSummary);
+  else if (adminStatus?.verified) content = '<p role="status">Cargando indicadores…</p>';
+  const refresh = adminSummary || adminStatus?.unavailable
+    ? '<button class="secondary-button" data-action="admin-open">Actualizar indicadores</button>' : '';
+  return `<section class="panel panel-pad owner-panel"><div class="section-heading"><div><h2>Panel del dueño</h2><p>Actividad de cuentas, sincronización y avisos</p></div>${refresh}</div>
     ${content}<div class="account-actions"><button class="text-button" data-action="admin-return">Volver a Cuenta</button></div></section>`;
 }
 
@@ -716,13 +763,18 @@ function renderAccount() {
   const local = readState(STORE_KEY);
   const hasLocalRecords = local.transactions.length || ['budgets','wallets','transfers','recurring','goals','categoryRules'].some(key => Object.keys(local[key]).length) || local.profile.name;
   const authPanel = authUser
-    ? `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Abre esta cuenta en tus dispositivos para ver tus movimientos.</p><div class="cloud-account"><span class="avatar">${svg('user')}</span><span><strong>${escapeHTML(authUser.email || 'Cuenta Saldo')}</strong><small data-cloud-status>${statusLabel}</small><small data-cloud-saved-at>${escapeHTML(lastCloudSaveLabel())}</small></span></div><div class="account-actions"><button class="secondary-button" data-action="sync-now">Sincronizar ahora</button><button class="secondary-button" data-action="sign-out">Cerrar sesión</button>${adminStatus?.allowed ? '<button class="secondary-button" data-action="admin-open">Panel del dueño</button>' : ''}${hasLocalRecords ? '<button class="text-button" data-action="import-local">Importar datos de invitado</button>' : ''}</div></section>`
+    ? `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Abre esta cuenta en tus dispositivos para ver tus movimientos.</p><div class="cloud-account"><span class="avatar">${svg('user')}</span><span><strong>${escapeHTML(authUser.email || 'Cuenta Saldo')}</strong><small data-cloud-status>${statusLabel}</small><small data-cloud-saved-at>${escapeHTML(lastCloudSaveLabel())}</small></span></div><div class="account-actions"><button class="secondary-button" data-action="sync-now">Sincronizar ahora</button><button class="secondary-button" data-action="sign-out">Cerrar sesión</button>${adminStatus?.allowed ? '<button class="secondary-button" data-action="admin-open">Panel del dueño</button>' : ''}${hasLocalRecords ? '<button class="text-button" data-action="import-local">Importar datos de invitado</button>' : ''}</div>${renderSyncChoices()}</section>`
     : `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Inicia sesión para guardar una copia en la nube y sincronizar tus dispositivos.</p><div class="account-actions"><button class="primary-button" data-action="auth-mode" data-mode="signin">Iniciar sesión</button><button class="secondary-button" data-action="auth-mode" data-mode="signup">Crear cuenta</button></div></section>`;
   const privacyTitle = authUser ? 'Tus datos están vinculados a tu cuenta' : 'Tus movimientos permanecen en este navegador';
   const privacyCopy = authUser ? 'Saldo conserva una copia local y sincroniza tus registros con tu cuenta autenticada. Puedes cerrar sesión para ocultarlos en este dispositivo.' : 'Al iniciar sesión, podrás recuperar tus datos en otro dispositivo. Sin cuenta, usa la copia de seguridad antes de cambiar de teléfono.';
   return `<div class="page-title-row"><div><h2>Tu cuenta y preferencias</h2><p>Configura tu perfil, tus avisos y tus copias de seguridad.</p></div><span class="local-badge">${svg('lock')} <span ${authUser ? 'data-cloud-status' : ''}>${authUser ? statusLabel : 'Perfil local'}</span></span></div>
     <div class="profile-layout"><div class="panel">
       ${authPanel}
+      <section class="form-section"><h3>Apariencia</h3><div class="field theme-picker">
+        <label for="saldo-theme">Tema</label>
+        <select id="saldo-theme" aria-describedby="theme-help">${[['system', 'Como el dispositivo'], ['light', 'Claro'], ['dark', 'Oscuro']].map(([value, label]) => `<option value="${value}" ${window.SaldoTheme.preference() === value ? 'selected' : ''}>${label}</option>`).join('')}</select>
+        <small id="theme-help" class="field-help">Tu elección se guarda en este dispositivo.</small>
+      </div></section>
       <section class="form-section"><h3>Mi perfil</h3><p>El nombre solo se usa para personalizar el saludo en este dispositivo.</p><form id="profile-form"><div class="form-grid"><div class="field full"><label for="profile-name">¿Cómo te llamamos?</label><input id="profile-name" name="name" maxlength="48" value="${escapeHTML(name)}" placeholder="Tu nombre" autocomplete="name" /></div><div class="field"><label>Moneda</label><input value="Peso colombiano (COP)" disabled aria-label="Moneda peso colombiano" /></div><div class="field"><label>Registros guardados</label><input value="${state.transactions.length}" disabled aria-label="Cantidad de movimientos" /></div></div><div class="form-actions"><button class="primary-button" type="submit">Guardar perfil</button></div></form></section>
       <section class="form-section"><h3>Recordatorios</h3><p>Elige cuándo quieres recibir avisos de presupuesto y recordatorios.</p>
         <div class="setting-row"><div><strong>Avisos de presupuesto</strong><small>Te avisa cuando un gasto registrado alcanza el 80% o supera un presupuesto.</small></div><button class="switch ${notifications ? 'on' : ''}" data-action="toggle-notifications" role="switch" aria-checked="${notifications}" aria-label="Activar avisos de presupuesto"></button></div>
@@ -873,7 +925,7 @@ function checkBudgetAlerts(month, category) {
 async function sendNotice(title, body) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return false;
   const options = {
-    body, icon: './icons/icon-192.png', badge: './icons/icon-192.png', tag: 'saldo-local',
+    body, icon: './icons/icon-192.png?v=7', badge: './icons/notification-badge.png?v=7', tag: 'saldo-local',
     data: { url: new URL('./', location.href).href },
   };
   try {
@@ -1142,10 +1194,7 @@ function importJSON(file) {
   reader.onload = () => {
     try {
       const parsed = JSON.parse(String(reader.result));
-      const imported = parsed?.format === 'saldo-backup-v1' ? parsed.state : parsed;
-      if (!imported || !Array.isArray(imported.transactions) || typeof imported.transactions !== 'object') throw new Error('Formato inválido');
-      const normalized = normalizeState(imported);
-      if (normalized.transactions.length !== imported.transactions.length) throw new Error('Movimientos inválidos');
+      const normalized = window.SaldoState.readBackup(parsed);
       if (!confirm(authUser ? 'La importación reemplazará los datos de tu cuenta. ¿Continuar?' : 'La importación reemplazará los datos de este dispositivo. ¿Continuar?')) return;
       state = normalized;
       cloudReset = Boolean(authUser);
@@ -1160,9 +1209,11 @@ function importJSON(file) {
 function handleAction(button) {
   if (handlePlanningAction(button)) return;
   const action = button.dataset.action;
+  if (action === 'retry-local') { storeState(); render(); return; }
+  if (action === 'resolve-sync') { resolveSync(button); return; }
   if (action === 'new-transaction') openTransaction();
   if (action === 'category-rules') { activeTab = 'rules'; render(); window.scrollTo(0,0); }
-  if (action === 'calendar-range') { calendarRange = button.dataset.range === '30' ? 30 : 7; render(); }
+  if (action === 'calendar-range') { calendarRange = button.dataset.range === 'all' ? 'all' : button.dataset.range === '30' ? 30 : 7; render(); }
   if (action === 'duplicate-transaction') openTransaction(button.dataset.id, true);
   if (action === 'reset-movement-filters') {
     walletFilter = categoryFilter = transactionFilter = 'all';
@@ -1190,7 +1241,7 @@ function handleAction(button) {
   if (action === 'prev-month') { viewMonth = shiftMonth(viewMonth, -1); render(); }
   if (action === 'next-month') { viewMonth = shiftMonth(viewMonth, 1); render(); }
   if (action === 'filter-transactions') { transactionFilter = button.dataset.filter; render(); }
-  if (action === 'edit-budget') { modal = { type: 'budget', category: button.dataset.category }; render(); window.setTimeout(() => root.querySelector('#budget-amount')?.focus(), 40); }
+  if (action === 'edit-budget') { modal = { type: 'budget', category: button.dataset.category }; render(); root.querySelector('#budget-amount')?.focus({preventScroll:true}); }
   if (action === 'toggle-notifications') {
     state.settings.notificationsEnabled = !state.settings.notificationsEnabled;
     persist(); render();
@@ -1204,7 +1255,7 @@ function handleAction(button) {
     if (!pushPublicKey) void preparePushForDevice();
     void saveCloudNow().then(saved => {
       render();
-      toast(saved ? 'Tus datos están sincronizados.' : 'No se pudo sincronizar. Conservamos los datos en este dispositivo.', saved ? 'success' : 'error');
+      toast(saved ? 'Tus datos están sincronizados.' : syncConflicts.length ? 'Elige la versión del movimiento en Cuenta.' : 'No se pudo sincronizar. Conservamos los datos en este dispositivo.', saved ? 'success' : 'error');
     });
   }
   if (action === 'auth-mode') changeAuthMode(button.dataset.mode);
@@ -1332,7 +1383,8 @@ root.addEventListener('toggle', event => {
 }, true);
 
 root.addEventListener('change', event => {
-  if (event.target.id === 'recurring-type') root.querySelector('#recurring-category').innerHTML = categoryOptions(event.target.value);
+  if (event.target.id === 'saldo-theme') window.SaldoTheme.setPreference(event.target.value);
+  if (event.target.id === 'scheduled-type') root.querySelector('#scheduled-category').innerHTML = categoryOptions(event.target.value);
 
   if (event.target.id === 'rule-type') root.querySelector('#rule-category').innerHTML = categoryOptions(event.target.value);
   if (event.target.id === 'filter-wallet') { walletFilter = event.target.value; render({focus:'filter-wallet'}); }

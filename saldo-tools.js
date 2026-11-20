@@ -1,11 +1,9 @@
 const plannerLabels = Object.freeze({
   budgets: 'Presupuestos',
-  recurring: 'Recurrentes',
   calendar: 'Calendario',
   wallets: 'Bolsillos',
   goals: 'Metas',
 });
-const frequencies = Object.freeze({ weekly: 'Semanal', biweekly: 'Cada dos semanas', monthly: 'Mensual' });
 
 function plannerTabs() {
   return `<nav class="planner-nav filter-group" aria-label="Planificación">${Object.entries(plannerLabels).map(([id, label]) =>
@@ -27,7 +25,6 @@ function walletOptions(current = 'general') {
 
 function renderPlanning() {
   if (plannerView === 'budgets') return plannerTabs() + renderBudgets();
-  if (plannerView === 'recurring') return plannerTabs() + renderRecurring();
   if (plannerView === 'calendar') return plannerTabs() + renderCalendar();
   if (plannerView === 'wallets') return plannerTabs() + renderWallets();
   return plannerTabs() + renderGoals();
@@ -41,34 +38,109 @@ function editPlanButton(kind, id, name) {
   return `<button class="text-button" data-action="plan-edit" data-kind="${kind}" data-id="${escapeHTML(id)}" aria-label="Editar ${escapeHTML(name)}">Editar</button>`;
 }
 
-function renderRecurringPreview() {
-  const items = window.SaldoRecurrence.upcomingRecurring(state.recurring, todayString()).slice(0, 3);
-  return items.length
-    ? `<ul class="plan-compact">${items.map(item => `<li><span><strong>${escapeHTML(item.title)}</strong><small>${formatDate(item.nextDue)} · ${item.type === 'income' ? 'Ingreso' : 'Gasto'}</small></span><strong>${formatMoney(item.amount)}</strong></li>`).join('')}</ul>`
-    : planEmpty('Organiza pagos fijos como arriendo, servicios y suscripciones.');
+function nequiWallet() {
+  return Object.values(state.wallets).find(wallet => searchable(wallet.name) === 'nequi');
 }
 
-function renderRecurring() {
-  const all = Object.values(state.recurring).sort((a, b) => Number(b.active) - Number(a.active) || a.nextDue.localeCompare(b.nextDue));
-  const today = todayString();
-  return `<div class="page-title-row"><div><h2>Movimientos recurrentes</h2><p>Programa un vencimiento y confirma cada pago o ingreso.</p></div><button class="primary-button" data-action="plan-edit" data-kind="recurring">${svg('plus')} Nuevo recurrente</button></div>
-    <div class="plan-grid">${all.length ? all.map(item => {
-      const late = item.active && item.nextDue < today;
-      const status = !item.active ? 'En pausa' : late ? 'Vencido' : item.nextDue === today ? 'Vence hoy' : 'Programado';
-      return `<article class="panel panel-pad plan-card"><div class="plan-card-top"><div><h3>${escapeHTML(item.title)}</h3><p>${item.type === 'income' ? 'Ingreso' : 'Gasto'} · ${frequencies[item.frequency]} · ${escapeHTML(walletLabel(item.walletId))}</p></div><span class="plan-status ${late ? 'late' : ''}">${status}</span></div>
-        <strong class="plan-amount">${formatMoney(item.amount)}</strong><p>Próxima fecha: ${formatDate(item.nextDue, {dateStyle: 'medium'})}</p>
-        <div class="account-actions">${item.active ? `<button class="secondary-button" data-action="confirm-recurring" data-id="${escapeHTML(item.id)}" data-due="${item.nextDue}">Registrar ${item.type === 'income' ? 'ingreso' : 'pago'}</button>` : ''}${editPlanButton('recurring', item.id, item.title)}</div></article>`;
-    }).join('') : planEmpty('Aún no tienes movimientos recurrentes.')}</div>`;
+function renderWalletHistory(wallet, transactions, transfers, open) {
+  const entries = transactions.map(tx => ({
+    title: tx.title || tx.category,
+    date: tx.date,
+    detail: [tx.type === 'income' ? 'Ingreso' : 'Gasto', tx.category, tx.merchant].filter(Boolean).join(' · '),
+    amount: tx.type === 'income' ? tx.amount : -tx.amount,
+  }));
+  for (const transfer of transfers) {
+    const incoming = transfer.toId === wallet.id;
+    entries.push({
+      title: incoming ? 'Transferencia desde ' + walletLabel(transfer.fromId) : 'Transferencia a ' + walletLabel(transfer.toId),
+      date: transfer.date, detail: transfer.note, amount: incoming ? transfer.amount : -transfer.amount,
+    });
+  }
+  entries.sort((a, b) => b.date.localeCompare(a.date));
+
+  return `<details class="wallet-history" data-wallet-history="${escapeHTML(wallet.id)}" ${open ? 'open' : ''}>
+    <summary aria-label="Historial de ${escapeHTML(wallet.name)}">Historial <small>${entries.length}</small></summary>
+    ${entries.length ? `<ul class="wallet-history-list plan-compact">${entries.map(entry => `<li>
+      <span><strong>${escapeHTML(entry.title)}</strong><small><time datetime="${escapeHTML(entry.date)}">${formatDate(entry.date, { dateStyle: 'medium' })}</time>${entry.detail ? ' · ' + escapeHTML(entry.detail) : ''}</small></span>
+      <strong class="wallet-history-amount ${entry.amount > 0 ? 'incoming' : ''}">${entry.amount > 0 ? '+' : '−'}${formatMoney(Math.abs(entry.amount))}</strong>
+    </li>`).join('')}</ul>` : '<p>Los movimientos de este bolsillo aparecerán aquí.</p>'}</details>`;
+}
+
+function renderNequiComparison() {
+  return `<details class="wallet-nequi">
+    <summary>Comparar con Nequi</summary>
+    <p>Compara con tus registros hasta hoy. Usa el Disponible si registras solo ese dinero. Si también registras fondos de Bolsillos, Metas o Colchón, súmalos al monto que vas a comparar.</p>
+    <form id="wallet-nequi-compare" class="wallet-reconcile">
+      <div class="field"><label for="wallet-nequi-balance">Saldo de hoy en Nequi (COP)</label><input id="wallet-nequi-balance" name="balance" type="text" inputmode="decimal" maxlength="15" pattern="[0-9]{1,12}([.,][0-9]{1,2})?" aria-describedby="nequi-balance-hint" required /><small id="nequi-balance-hint" class="field-help">Hasta dos decimales. Ejemplo 123456,78.</small></div>
+      <button class="secondary-button" type="submit">Comparar</button>
+      <output for="wallet-nequi-balance" role="status" aria-live="polite" aria-atomic="true"></output>
+    </form>
+    <a class="text-button" href="https://ayuda.nequi.com.co/hc/es/articles/35533244922637" target="_blank" rel="noopener noreferrer">Cómo descargar extractos de Nequi</a>
+  </details>`;
 }
 
 function renderWallets() {
   const items = allWallets();
   const transfers = Object.values(state.transfers).sort((a, b) => b.date.localeCompare(a.date));
-  return `<div class="page-title-row"><div><h2>Tus bolsillos</h2><p>Separa efectivo, Nequi o una cuenta bancaria. Los saldos se llevan de forma manual.</p></div><div class="account-actions"><button class="primary-button" data-action="plan-edit" data-kind="wallets">${svg('plus')} Nuevo bolsillo</button><button class="secondary-button" data-action="plan-edit" data-kind="transfers" ${items.length < 2 ? 'disabled title="Agrega otro bolsillo primero"' : ''}>Transferir</button></div></div>
-    <div class="plan-grid">${items.map(wallet => `<article class="panel panel-pad plan-card"><div class="plan-card-top"><div><h3>${escapeHTML(wallet.name)}</h3><p>${wallet.id === 'general' ? 'Movimientos sin bolsillo asignado' : 'Saldo inicial: ' + formatMoney(wallet.openingBalance)}</p></div>${wallet.id === 'general' ? '' : editPlanButton('wallets', wallet.id, wallet.name)}</div><strong class="plan-amount">${formatMoney(window.SaldoPlanning.walletBalance(wallet, state.transactions, state.transfers))}</strong></article>`).join('')}</div>
-    <section class="panel panel-pad activity-panel"><div class="section-heading"><div><h2>Transferencias</h2><p>Se reflejan en tus bolsillos y quedan fuera de ingresos y gastos.</p></div></div>
+  const ledger = new Map(items.map(wallet => [wallet.id, { transactions: [], transfers: [] }]));
+  const existingNequi = nequiWallet();
+  const opened = new Set(Array.from(root.querySelectorAll('.wallet-history[open]'), detail => detail.dataset.walletHistory));
+
+  for (const tx of state.transactions) ledger.get(tx.walletId || 'general')?.transactions.push(tx);
+  for (const transfer of transfers) {
+    ledger.get(transfer.fromId)?.transfers.push(transfer);
+    ledger.get(transfer.toId)?.transfers.push(transfer);
+  }
+
+  let total = 0;
+  const cards = items.map(wallet => {
+    const activity = ledger.get(wallet.id);
+    const balance = window.SaldoPlanning.walletBalance(wallet, activity.transactions, activity.transfers);
+    total += balance;
+
+    return `<article class="panel panel-pad plan-card">
+      <div class="plan-card-top"><div><h3>${escapeHTML(wallet.name)}</h3><p>${wallet.id === 'general' ? 'Movimientos sin bolsillo asignado' : 'Saldo inicial: ' + formatMoney(wallet.openingBalance)}</p></div>
+      ${wallet.id === 'general' ? '' : editPlanButton('wallets', wallet.id, wallet.name)}</div>
+      <strong class="plan-amount">${formatMoney(balance)}</strong>
+      ${renderWalletHistory(wallet, activity.transactions, activity.transfers, opened.has(wallet.id))}
+      ${wallet.id === existingNequi?.id ? renderNequiComparison() : ''}</article>`;
+  });
+
+  return `<div class="page-title-row"><div><h2>Tus bolsillos</h2><p>Organiza efectivo, Nequi o una cuenta con tus registros manuales.</p></div>
+    <div class="account-actions"><button class="primary-button" data-action="plan-edit" data-kind="wallets">${svg('plus')} Nuevo bolsillo</button><button class="secondary-button" data-action="plan-edit" data-kind="transfers" ${items.length < 2 ? 'disabled title="Agrega otro bolsillo primero"' : ''}>Transferir</button><button class="text-button" data-action="plan-nequi">Configurar Nequi</button></div></div>
+    <section class="panel panel-pad wallet-total" aria-labelledby="wallet-total-title"><div><h3 id="wallet-total-title">Total registrado</h3><p>Incluye saldos iniciales y movimientos de cualquier fecha. Cada transferencia se registra como salida de un bolsillo y entrada de otro.</p></div><strong class="plan-amount">${formatMoney(total)}</strong></section>
+    <div class="plan-grid wallet-grid">${cards.join('')}</div>
+    <section class="panel panel-pad activity-panel"><div class="section-heading"><div><h2>Transferencias</h2><p>Consulta y edita los traspasos entre bolsillos.</p></div></div>
       ${transfers.length ? `<ul class="plan-compact">${transfers.map(item => `<li><span><strong>${escapeHTML(walletLabel(item.fromId))} → ${escapeHTML(walletLabel(item.toId))}</strong><small>${formatDate(item.date)}${item.note ? ' · ' + escapeHTML(item.note) : ''}</small></span><span class="plan-transfer-value"><strong>${formatMoney(item.amount)}</strong>${editPlanButton('transfers', item.id, 'transferencia')}</span></li>`).join('')}</ul>` : planEmpty('Las transferencias entre bolsillos aparecerán aquí.')}</section>`;
 }
+
+function reviewNequiBalance(form) {
+  const wallet = nequiWallet();
+  if (!wallet || !form.reportValidity()) return;
+  const [pesos, decimals = ''] = form.elements.balance.value.replace(',', '.').split('.');
+  const enteredCents = Number(pesos) * 100 + Number(decimals.padEnd(2, '0'));
+  const today = todayString();
+  const transactions = state.transactions.filter(tx => tx.date <= today);
+  const transfers = Object.values(state.transfers).filter(item => item.date <= today);
+  const recorded = window.SaldoPlanning.walletBalance(wallet, transactions, transfers);
+  const differenceCents = enteredCents - recorded * 100;
+  const gap = Math.abs(differenceCents) / 100;
+  const formattedGap = differenceCents % 100 === 0 ? formatMoney(gap) : new Intl.NumberFormat('es-CO', {
+    style: 'currency', currency: 'COP', minimumFractionDigits: 2, maximumFractionDigits: 2,
+  }).format(gap);
+  form.querySelector('output').textContent = differenceCents === 0 ? 'Los saldos coinciden en ' + formatMoney(recorded) + '.'
+    : 'Tu saldo en Nequi es ' + formattedGap + (differenceCents > 0 ? ' mayor' : ' menor') + ' que el registrado en Saldo (' + formatMoney(recorded) + ').';
+}
+
+document.addEventListener('input', event => {
+  if (event.target.id === 'wallet-nequi-balance') event.target.form.querySelector('output').textContent = '';
+});
+
+document.addEventListener('submit', event => {
+  if (event.target.id !== 'wallet-nequi-compare') return;
+  event.preventDefault();
+  reviewNequiBalance(event.target);
+});
 
 function renderGoals() {
   const entries = Object.values(state.goals);
@@ -83,9 +155,14 @@ function renderGoals() {
 }
 
 const toolTitles = Object.freeze({
-  recurring: 'Movimiento recurrente', wallets: 'Bolsillo', transfers: 'Transferencia',
+  scheduled: 'Movimiento programado', wallets: 'Bolsillo', transfers: 'Transferencia',
   goals: 'Meta de ahorro', contribution: 'Anotar aporte', categoryRules: 'Regla de categoría',
 });
+
+function planCollection(kind) {
+  if (kind === 'scheduled') return 'recurring';
+  return kind === 'contribution' ? 'goals' : kind;
+}
 
 function toolNumber(id, name, label, value, { min = 1, max = 999999999999, required = true } = {}) {
   return `<div class="field"><label for="${id}">${label}</label><input id="${id}" name="${name}" inputmode="numeric" type="number" min="${min}" max="${max}" step="1" ${required ? 'required' : ''} value="${value ?? ''}"/></div>`;
@@ -117,7 +194,7 @@ function renderToolFields(kind, existing) {
       + `<label class="plan-checkbox"><input type="checkbox" name="active" ${existing?.active === false ? '' : 'checked'}/> Regla activa</label>`;
   }
 
-  if (kind === 'wallets') return toolText('wallet-name', 'name', 'Nombre', existing?.name)
+  if (kind === 'wallets') return toolText('wallet-name', 'name', 'Nombre', existing?.name || (modal.setupNequi ? 'Nequi' : ''))
     + toolNumber('wallet-opening', 'openingBalance', 'Saldo inicial (COP)', existing?.openingBalance ?? 0, { min: -999999999999 })
     + '<p class="field-help">Anota el saldo de partida antes de los movimientos que vas a asignar a este bolsillo.</p>';
   if (kind === 'transfers') return toolSelect('transfer-from', 'fromId', 'Bolsillo de origen', walletOptions(existing?.fromId))
@@ -132,22 +209,20 @@ function renderToolFields(kind, existing) {
   if (kind === 'contribution') return toolNumber('goal-contribution', 'amount', 'Aporte (COP)', null)
     + '<p class="field-help">Este aporte actualiza el avance de la meta. Para reflejar dinero movido entre bolsillos, registra también la transferencia.</p>';
   const type = existing?.type || 'expense';
-  return toolText('recurring-title', 'title', 'Concepto', existing?.title, 80)
-    + toolSelect('recurring-type', 'type', 'Tipo', `<option value="expense" ${type === 'expense' ? 'selected' : ''}>Gasto</option><option value="income" ${type === 'income' ? 'selected' : ''}>Ingreso</option>`)
-    + toolSelect('recurring-category', 'category', 'Categoría', categoryOptions(type, existing?.category))
-    + toolNumber('recurring-amount', 'amount', 'Valor (COP)', existing?.amount)
-    + toolSelect('recurring-wallet', 'walletId', 'Bolsillo', walletOptions(existing?.walletId))
-    + toolDate('recurring-date', 'nextDue', 'Próximo vencimiento', existing?.nextDue || todayString())
-    + toolSelect('recurring-frequency', 'frequency', 'Frecuencia', Object.entries(frequencies).map(([id,label]) =>
-      `<option value="${id}" ${(existing?.frequency || 'monthly') === id ? 'selected' : ''}>${label}</option>`).join(''))
-    + toolNumber('recurring-lead', 'leadDays', 'Avisar con días de anticipación', existing?.leadDays ?? 1, { min: 0, max: 7 })
-    + '<p class="field-help">El aviso se programa a las 8:00 a. m., hora de Colombia, si activaste push. Con 0 días, llega el día del vencimiento.</p>'
-    + `<label class="plan-checkbox"><input type="checkbox" name="active" ${existing?.active === false ? '' : 'checked'}/> Recurrente activo</label>`;
+  return toolText('scheduled-title', 'title', 'Concepto', existing?.title, 80)
+    + toolSelect('scheduled-type', 'type', 'Tipo', `<option value="expense" ${type === 'expense' ? 'selected' : ''}>Gasto</option><option value="income" ${type === 'income' ? 'selected' : ''}>Ingreso</option>`)
+    + toolSelect('scheduled-category', 'category', 'Categoría', categoryOptions(type, existing?.category))
+    + toolNumber('scheduled-amount', 'amount', 'Valor (COP)', existing?.amount)
+    + toolSelect('scheduled-wallet', 'walletId', 'Bolsillo', walletOptions(existing?.walletId))
+    + toolDate('scheduled-date', 'nextDue', 'Fecha programada', existing?.nextDue || todayString())
+    + toolNumber('scheduled-lead', 'leadDays', 'Avisar con días de anticipación', existing?.leadDays ?? 1, { min: 0, max: 7 })
+    + '<p class="field-help">Si activaste las notificaciones push, Saldo te avisa a las 8:00 a. m. de Colombia. Con 0 días, el aviso llega el día programado.</p>'
+    + `<label class="plan-checkbox"><input type="checkbox" name="active" ${existing?.active === false ? '' : 'checked'}/> Movimiento activo</label>`;
 }
 
 function renderToolModal() {
   const { kind, id } = modal;
-  const existing = state[kind === 'contribution' ? 'goals' : kind]?.[id];
+  const existing = state[planCollection(kind)]?.[id];
   return `<div class="modal-backdrop" data-action="backdrop-close"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-header"><div><h2 id="modal-title">${toolTitles[kind]}</h2>${kind === 'contribution' ? `<p>${escapeHTML(existing?.name)}</p>` : ''}</div><button class="icon-button" data-action="close-modal" aria-label="Cerrar">${svg('close')}</button></div>
     <div class="modal-body"><form class="modal-form" id="plan-form">${renderToolFields(kind, existing)}
@@ -155,9 +230,18 @@ function renderToolModal() {
 }
 
 function saveToolForm(form) {
-  const { kind, id = crypto.randomUUID() } = modal;
+  const { kind, setupNequi } = modal;
   const data = new FormData(form);
   const text = name => String(data.get(name) || '').trim();
+  const initialNequi = setupNequi && !modal.id && searchable(text('name')) === 'nequi';
+  const existingNequi = initialNequi ? nequiWallet() : null;
+  if (existingNequi) {
+    modal.id = existingNequi.id;
+    render();
+    toast('Ya tienes un bolsillo Nequi. Puedes revisar su saldo inicial.', 'info');
+    return;
+  }
+  const id = modal.id || (initialNequi && !Object.hasOwn(state.wallets, 'nequi') ? 'nequi' : crypto.randomUUID());
   const number = name => Number(data.get(name));
   const draft = kind === 'wallets' ? { id, name: text('name'), openingBalance: number('openingBalance') }
     : kind === 'transfers' ? { id, fromId: text('fromId'), toId: text('toId'), amount: number('amount'), date: text('date'), note: text('note') }
@@ -166,11 +250,10 @@ function saveToolForm(form) {
     : kind === 'contribution' ? { ...state.goals[id], saved: (state.goals[id]?.saved || 0) + number('amount') }
     : {
       id, title: text('title'), type: text('type'), category: text('category'), amount: number('amount'),
-      nextDue: text('nextDue'), frequency: text('frequency'), leadDays: number('leadDays'),
-      dayOfMonth: state.recurring[id]?.nextDue === text('nextDue') ? state.recurring[id].dayOfMonth : Number(text('nextDue').slice(-2)),
+      nextDue: text('nextDue'), frequency: 'once', leadDays: number('leadDays'),
       active: data.has('active'), walletId: text('walletId'),
     };
-  const collection = kind === 'contribution' ? 'goals' : kind;
+  const collection = planCollection(kind);
   if (kind === 'transfers' && draft.fromId === draft.toId) { toast('Elige dos bolsillos distintos.', 'error'); return; }
   if (kind === 'contribution' && !positiveAmount(number('amount'))) { toast('Escribe un aporte válido.', 'error'); return; }
   const next = normalizeState({ ...state, [collection]: { ...state[collection], [id]: draft } });
@@ -192,6 +275,12 @@ function handlePlanningAction(button) {
     window.scrollTo(0, 0);
     return true;
   }
+  if (action === 'plan-nequi') {
+    modal = { type: 'planning', kind: 'wallets', id: nequiWallet()?.id, setupNequi: true };
+    render();
+    root.querySelector('#wallet-opening')?.focus({ preventScroll: true });
+    return true;
+  }
   if (action === 'plan-edit') {
     if (!Object.hasOwn(toolTitles, kind)) return true;
     modal = { type: 'planning', kind, id };
@@ -200,13 +289,14 @@ function handlePlanningAction(button) {
     return true;
   }
   if (action === 'plan-remove') {
-    const { kind: collection, id: itemId } = modal;
+    const { kind: itemKind, id: itemId } = modal;
+    const collection = planCollection(itemKind);
     if (collection === 'wallets' && (
       state.transactions.some(tx => tx.walletId === itemId) ||
       Object.values(state.transfers).some(item => item.fromId === itemId || item.toId === itemId) ||
       Object.values(state.recurring).some(item => item.walletId === itemId)
-    )) { toast('Este bolsillo está en uso. Primero cambia sus movimientos, transferencias o recurrentes.', 'info'); return true; }
-    if (!confirm('¿Eliminar este registro?')) return true;
+    )) { toast('Este bolsillo está en uso. Primero cambia sus movimientos, transferencias o movimientos programados.', 'info'); return true; }
+    if (!confirm(itemKind === 'scheduled' ? '¿Eliminar este movimiento del calendario?' : '¿Eliminar este registro?')) return true;
     delete state[collection][itemId];
     persist();
     modal = null;
@@ -214,12 +304,12 @@ function handlePlanningAction(button) {
     toast('Registro eliminado.');
     return true;
   }
-  if (action === 'confirm-recurring') {
+  if (action === 'confirm-scheduled') {
     const item = state.recurring[id];
     if (!item?.active || item.nextDue !== due) return true;
-    const sentence = item.type === 'income' ? 'Registrar ingreso' : 'Registrar pago';
-    if (!confirm(sentence + ' de ' + formatMoney(item.amount) + ' con fecha ' + formatDate(item.nextDue) + ' y avanzar al siguiente vencimiento?')) return true;
-    const occurrence = window.SaldoRecurrence.confirmRecurring(item);
+    const sentence = item.type === 'income' ? '¿Registrar cobro' : '¿Registrar pago';
+    if (!confirm(sentence + ' de ' + formatMoney(item.amount) + ' con fecha ' + formatDate(item.nextDue) + '?')) return true;
+    const occurrence = window.SaldoRecurrence.confirmRecurring({ ...item, frequency: 'once' });
     if (!occurrence) { toast('No se pudo preparar este vencimiento.', 'error'); return true; }
     const { transaction, next } = occurrence;
     if (!state.transactions.some(tx => tx.id === transaction.id)) state.transactions.push(transaction);
@@ -227,7 +317,7 @@ function handlePlanningAction(button) {
     const alert = transaction.type === 'expense' ? checkBudgetAlerts(transaction.date.slice(0, 7), transaction.category) : '';
     persist();
     render();
-    toast(alert || 'Movimiento registrado y próximo vencimiento actualizado.', alert ? 'info' : 'success');
+    toast(alert || 'Movimiento registrado.', alert ? 'info' : 'success');
     return true;
   }
   return false;

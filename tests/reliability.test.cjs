@@ -1,0 +1,14 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { normalize, merge, readBackup, transactionConflicts } = require('../saldo-state.js');
+const tx = { id:'a', title:'Pasaje', date:'2026-11-20', amount:5000, type:'expense', category:'Transporte', walletId:'b' };
+const wallet = { id:'b', name:'Efectivo', openingBalance:40000 };
+const ledger = (amount, extra={}) => normalize({ transactions:amount ? [{...tx, amount}] : [], wallets:{b:wallet}, ...extra });
+test('dos ediciones incompatibles requieren una elección',()=>assert.equal(transactionConflicts(ledger(5000),ledger(6000),ledger(7000)).length,1));
+test('la misma edición en dos dispositivos converge',()=>assert.deepEqual(transactionConflicts(ledger(5000),ledger(6000),ledger(6000)),[]));
+test('eliminar mientras otra persona edita conserva las dos alternativas',()=>assert.equal(transactionConflicts(ledger(5000),ledger(0),ledger(6000))[0].device,undefined));
+test('eliminar un bolsillo mientras llega un gasto conserva su saldo inicial',()=>assert.equal(merge(ledger(0),ledger(0,{wallets:{}}),ledger(5000)).wallets.b.openingBalance,40000));
+test('una transferencia simultánea conserva su bolsillo',()=>assert.ok(merge(ledger(0),ledger(0,{wallets:{}}),ledger(0,{transfers:{t:{id:'t',fromId:'b',toId:'general',amount:1000,date:tx.date}}})).transfers.t));
+test('la copia íntegra recupera el estado exactamente',()=>assert.deepEqual(readBackup({format:'saldo-backup-v1',state:ledger(5000)}),ledger(5000)));
+test('la copia antigua con movimientos sigue siendo válida',()=>assert.equal(readBackup({transactions:[]}).schemaVersion,7));
+for(const [name,raw] of Object.entries({truncated:{transactions:[],wallets:[]},future:{transactions:[],schemaVersion:9},orphan:{transactions:[tx]},duplicate:{...ledger(5000),transactions:[tx,tx]},transfer:{...ledger(5000),transfers:{bad:{id:'bad'}}},budget:{...ledger(5000),budgets:{'2026-11':{Hogar:1500,Salud:-1}}}})) test('rechaza copia inválida '+name,()=>assert.throws(()=>readBackup(raw)));

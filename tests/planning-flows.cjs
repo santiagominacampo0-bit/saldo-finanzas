@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const { chromium } = require(process.env.SALDO_PLAYWRIGHT_MODULE || 'playwright');
 const url = process.env.SALDO_QA_URL || 'http://localhost:4173/';
-const sizes = [{ width: 320, height: 640 }, { width: 390, height: 844 }, { width: 850, height: 400 }, { width: 1440, height: 900 }];
+const sizes = [{ width: 320, height: 640 }, { width: 390, height: 844 }, { width: 850, height: 400 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }];
 
 function check(value, label) { assert.ok(value, label); }
 
@@ -24,10 +24,12 @@ async function examine(browser, viewport) {
     await page.goto(url);
     await page.locator('[data-action="guest"]').click();
     test(await page.getByText('Balance del mes', {exact:true}).isVisible(), 'balance del mes destacado');
-    test(await page.getByText('Próximos vencimientos', {exact:true}).isVisible(), 'inicio anticipa vencimientos');
+    test(await page.getByText('Disponible después de pagos', {exact:true}).isVisible(), 'inicio anticipa disponibilidad');
+    test(await page.getByText('Ver recurrentes', {exact:true}).count() === 0, 'inicio usa una sola entrada de calendario');
     await nav('budgets');
-    test(await page.locator('.planner-nav button').count() === 5, 'cinco secciones de planificación');
+    test(await page.locator('.planner-nav button').count() === 4, 'cuatro secciones de planificación');
     test(await fits(), 'pestañas completas en el ancho');
+    test(await page.locator('.planner-nav [data-view=recurring]').count() === 0, 'sin pestaña separada de recurrentes');
     test(!await page.locator('.content [data-action="export-csv"]').count(), 'presupuesto no duplica exportación');
     await plan('wallets');
     test(await page.getByRole('heading',{ name:'General',exact:true }).isVisible(), 'bolsillo general visible');
@@ -62,29 +64,59 @@ async function examine(browser, viewport) {
     await plan('wallets');
     test((await page.getByRole('heading',{name:'Efectivo QA'}).locator('xpath=ancestor::article').textContent()).includes('95.000'), 'gasto se asigna al bolsillo elegido');
 
-    await plan('recurring');
-    await page.getByRole('button',{ name:'Nuevo recurrente' }).click();
-    await dialog().getByLabel('Concepto').fill('Arriendo QA');
-    await dialog().getByLabel('Valor (COP)').fill('9000');
+    await plan('calendar');
+    const calendarRow = title => page.locator('.calendar-row').filter({ has: page.getByText(title, { exact: true }) });
+    const createSchedule = async (title, amount) => {
+      await page.getByRole('button', { name: 'Programar movimiento' }).click();
+      await dialog().getByLabel('Concepto').fill(title);
+      await dialog().getByLabel('Valor (COP)').fill(amount);
+    };
+    await createSchedule('Arriendo QA', '9000');
+    test(await dialog().getByLabel('Frecuencia').count() === 0, 'el formulario programa una sola fecha');
     await dialog().getByLabel('Avisar con días de anticipación').fill('2');
-    const occurrence = await dialog().getByLabel('Próximo vencimiento').inputValue();
+    const occurrence = await dialog().getByLabel('Fecha programada').inputValue();
     await save();
-    test(await page.getByRole('heading',{name:'Arriendo QA'}).isVisible(), 'crea pago recurrente');
-    await nav('home');
-    test(await page.getByText('Arriendo QA',{exact:true}).isVisible(), 'próximo pago mostrado en inicio');
+    const rent = calendarRow('Arriendo QA');
+    test(await rent.getByText('Pendiente', { exact: true }).isVisible(), 'crea un pago para una fecha');
     await nav('movements');
-    test(await page.getByText('Arriendo QA',{exact:true}).count() === 0, 'programar no contabiliza el pago');
+    test(await page.getByText('Arriendo QA', { exact: true }).count() === 0, 'programar no contabiliza el pago');
     await nav('budgets');
-    await plan('recurring');
-    await page.getByRole('button',{ name:'Registrar pago' }).click();
-    // Playwright requires accepting the in-app confirmation instead of default dismissal.
-    let rule = page.getByRole('button',{name:'Registrar pago'});
-    test(await rule.getAttribute('data-due') === occurrence, 'cancelar mantiene el mismo vencimiento');
-    page.once('dialog', d => d.accept());
-    await rule.click();
-    test(await rule.getAttribute('data-due') > occurrence, 'confirmar adelanta al próximo vencimiento');
+    await plan('calendar');
+    const confirmRent = rent.getByRole('button', { name: 'Registrar pago' });
+    await confirmRent.click();
+    test(await confirmRent.getAttribute('data-due') === occurrence, 'cancelar mantiene el pago pendiente');
+    page.once('dialog', dialog => dialog.accept());
+    await confirmRent.click();
+    test(await rent.getByText('Registrado', { exact: true }).isVisible(), 'confirmar marca el movimiento registrado');
+    test(await confirmRent.count() === 0, 'un pago registrado no se confirma otra vez');
+    await page.getByRole('button', { name: 'Todas las fechas' }).click();
+    test(await rent.count() === 1, 'un pago confirmado no agrega otra fecha');
     await nav('movements');
-    test(await page.getByText('Arriendo QA',{exact:true}).count() === 1, 'confirmar registra exactamente un pago');
+    test(await page.getByText('Arriendo QA', { exact: true }).count() === 1, 'confirmar registra exactamente un pago');
+
+    await nav('budgets');
+    await plan('calendar');
+    await createSchedule('Ingreso lejano QA', '50000');
+    await dialog().getByLabel('Tipo', { exact: true }).selectOption('income');
+    test(await dialog().getByLabel('Categoría').locator('option').filter({ hasText: 'Salario' }).count() === 1, 'actualiza categorías para un cobro');
+    const future = new Date(Date.parse(occurrence + 'T00:00:00Z') + 45 * 86400000).toISOString().slice(0, 10);
+    await dialog().getByLabel('Fecha programada').fill(future);
+    await save();
+    const far = calendarRow('Ingreso lejano QA');
+    test(await far.getByRole('button', { name: 'Registrar cobro' }).isVisible(), 'todas las fechas muestra cobros más allá de treinta días');
+    await page.getByRole('button', { name: '30 días' }).click();
+    test(await far.count() === 0, 'la ventana de treinta días excluye el cobro lejano');
+    await page.getByRole('button', { name: 'Todas las fechas' }).click();
+    await far.getByRole('button', { name: 'Editar Ingreso lejano QA' }).click();
+    await dialog().getByLabel('Movimiento activo').uncheck();
+    await save();
+    test(await far.getByText('En pausa', { exact: true }).isVisible(), 'puede pausar un cobro previsto');
+    test(await far.getByRole('button', { name: 'Registrar cobro' }).count() === 0, 'un cobro en pausa no se puede registrar');
+    await far.getByRole('button', { name: 'Editar Ingreso lejano QA' }).click();
+    page.once('dialog', dialog => dialog.accept());
+    await dialog().getByRole('button', {name: 'Eliminar'}).click();
+    test(await far.count() === 0, 'puede eliminar del calendario un cobro lejano');
+    test(await fits(), 'el calendario y sus controles caben en el ancho');
 
     await nav('budgets');
     await plan('goals');

@@ -1,6 +1,6 @@
 /* Reglas de movimientos recurrentes compartidas por la app y las pruebas. */
 (function (root) {
-  const frequencies = new Set(['weekly', 'biweekly', 'monthly']);
+  const frequencies = new Set(['once', 'weekly', 'biweekly', 'monthly']);
   const fallbackCategories = { income: 'Otros ingresos', expense: 'Otros gastos' };
   const maxAmount = 999999999999;
 
@@ -58,7 +58,7 @@
 
   function advanceRecurring(value) {
     const item = normalizeItem(value);
-    if (!item) return null;
+    if (!item || item.frequency === 'once') return null;
     const date = new Date(item.nextDue + 'T00:00:00Z');
 
     if (item.frequency === 'monthly') {
@@ -81,10 +81,11 @@
   }
 
   function confirmRecurring(value) {
-    const next = advanceRecurring(value);
-    if (!next?.active) return null;
-    const occurrenceDate = value.nextDue;
-    const { id, type, title, amount, category, walletId } = next;
+    const item = normalizeItem(value);
+    if (!item?.active) return null;
+    const next = item.frequency === 'once' ? { ...item, active: false } : advanceRecurring(item);
+    if (!next) return null;
+    const { id, type, title, amount, category, walletId, nextDue: occurrenceDate } = item;
     const transaction = {
       id: `rec-${id}-${occurrenceDate}`, type, title, amount, category, date: occurrenceDate, note: '',
       ...(walletId ? { walletId } : {}),
