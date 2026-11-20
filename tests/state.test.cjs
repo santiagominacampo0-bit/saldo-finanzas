@@ -84,3 +84,20 @@ test('dos confirmaciones de un mismo vencimiento no duplican movimientos', () =>
   assert.equal(both.transactions.length, 1);
   assert.equal(both.recurring.rent.nextDue, '2026-12-30');
 });
+
+test('regla de categoría y comercio sobreviven cambios en otro dispositivo', () => {
+  const rule = { id:'farmacia', pattern:'Farmacia', category:'Salud', type:'expense', match:'contains', active:true };
+  const base = normalize({ transactions: [transaction('a')] });
+  const local = normalize({ ...base, categoryRules: { farmacia:rule } });
+  const remote = normalize({ ...base, transactions: [{ ...transaction('a'), merchant:'Comercio local' }] });
+  const result = merge(base, local, remote);
+  assert.equal(result.categoryRules.farmacia.category,'Salud');
+  assert.equal(result.transactions[0].merchant,'Comercio local');
+});
+test('quitar una regla no altera categorías de movimientos guardados', () => {
+  const base = normalize({ categoryRules: { x: { id:'x', pattern:'Compra', category:'Salud', type:'expense', match:'contains', active:true } }, transactions: [transaction('a')] });
+  const local = normalize({ ...base, categoryRules:{} });
+  const result = merge(base, local, base);
+  assert.equal(Object.keys(result.categoryRules).length,0);
+  assert.equal(result.transactions[0].category,'Alimentación');
+});

@@ -1,6 +1,7 @@
 const plannerLabels = Object.freeze({
   budgets: 'Presupuestos',
   recurring: 'Recurrentes',
+  calendar: 'Calendario',
   wallets: 'Bolsillos',
   goals: 'Metas',
 });
@@ -27,6 +28,7 @@ function walletOptions(current = 'general') {
 function renderPlanning() {
   if (plannerView === 'budgets') return plannerTabs() + renderBudgets();
   if (plannerView === 'recurring') return plannerTabs() + renderRecurring();
+  if (plannerView === 'calendar') return plannerTabs() + renderCalendar();
   if (plannerView === 'wallets') return plannerTabs() + renderWallets();
   return plannerTabs() + renderGoals();
 }
@@ -82,7 +84,7 @@ function renderGoals() {
 
 const toolTitles = Object.freeze({
   recurring: 'Movimiento recurrente', wallets: 'Bolsillo', transfers: 'Transferencia',
-  goals: 'Meta de ahorro', contribution: 'Anotar aporte',
+  goals: 'Meta de ahorro', contribution: 'Anotar aporte', categoryRules: 'Regla de categoría',
 });
 
 function toolNumber(id, name, label, value, { min = 1, max = 999999999999, required = true } = {}) {
@@ -106,6 +108,15 @@ function categoryOptions(type, selected) {
 }
 
 function renderToolFields(kind, existing) {
+  if (kind === 'categoryRules') {
+    const type = existing?.type || 'expense';
+    return toolText('rule-pattern', 'pattern', 'Comercio o texto del concepto', existing?.pattern, 64)
+      + toolSelect('rule-match', 'match', 'Coincidencia', `<option value="contains" ${existing?.match !== 'exact' ? 'selected' : ''}>Contiene estas palabras</option><option value="exact" ${existing?.match === 'exact' ? 'selected' : ''}>Igual al texto</option>`)
+      + toolSelect('rule-type', 'type', 'Tipo de movimiento', `<option value="expense" ${type === 'expense' ? 'selected' : ''}>Gasto</option><option value="income" ${type === 'income' ? 'selected' : ''}>Ingreso</option>`)
+      + toolSelect('rule-category', 'category', 'Categoría', categoryOptions(type, existing?.category))
+      + `<label class="plan-checkbox"><input type="checkbox" name="active" ${existing?.active === false ? '' : 'checked'}/> Regla activa</label>`;
+  }
+
   if (kind === 'wallets') return toolText('wallet-name', 'name', 'Nombre', existing?.name)
     + toolNumber('wallet-opening', 'openingBalance', 'Saldo inicial (COP)', existing?.openingBalance ?? 0, { min: -999999999999 })
     + '<p class="field-help">Anota el saldo de partida antes de los movimientos que vas a asignar a este bolsillo.</p>';
@@ -151,6 +162,7 @@ function saveToolForm(form) {
   const draft = kind === 'wallets' ? { id, name: text('name'), openingBalance: number('openingBalance') }
     : kind === 'transfers' ? { id, fromId: text('fromId'), toId: text('toId'), amount: number('amount'), date: text('date'), note: text('note') }
     : kind === 'goals' ? { id, name: text('name'), target: number('target'), saved: number('saved'), deadline: text('deadline') }
+    : kind === 'categoryRules' ? { id, pattern: text('pattern'), match: text('match'), type: text('type'), category: text('category'), active: data.has('active') }
     : kind === 'contribution' ? { ...state.goals[id], saved: (state.goals[id]?.saved || 0) + number('amount') }
     : {
       id, title: text('title'), type: text('type'), category: text('category'), amount: number('amount'),

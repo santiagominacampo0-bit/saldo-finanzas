@@ -31,6 +31,7 @@ async function addExpense(page, amount, title) {
   await page.locator('.topbar [data-action="new-transaction"]').click();
   await page.locator('#tx-amount').fill(amount);
   await page.locator('#tx-title').fill(title);
+  await page.locator('#tx-category').selectOption('Alimentación');
   await page.locator('#transaction-form button[type="submit"]').click();
   await page.locator('#transaction-form').waitFor({ state: 'hidden' });
 }
@@ -73,7 +74,9 @@ async function main() {
       return json([]);
     }
     if (target.pathname === '/rest/v1/rpc/saldo_admin_access') return json({ allowed: fake.owner, verified: fake.verified });
-    if (target.pathname === '/rest/v1/rpc/saldo_admin_summary') return json({ accounts: 1, sync_accounts: 1, push_devices: 0 });
+    if (target.pathname === '/rest/v1/rpc/saldo_admin_summary') return json({ accounts: 1, sync_accounts: 1, push_devices: 0,
+      notification_check: { last_started_at: new Date(Date.now() - 2000).toISOString(), last_finished_at: new Date().toISOString(), last_failure_at: new Date().toISOString(), provider_rejections: 1, accepted: 2 },
+    });
     if (target.pathname === '/auth/v1/user') return json({ ...user, factors: [] });
     if (target.pathname === '/auth/v1/factors' && method === 'POST') return json({
       id: 'test-factor', type: 'totp', totp: {
@@ -110,6 +113,8 @@ async function main() {
     check(await page.getByText('92% utilizado', { exact: true }).count() === 1, 'presupuesto calcula el porcentaje');
     await tab(page, 'reports');
     check(await page.getByRole('img', { name: 'Comparación de ingresos y gastos mensuales' }).count() === 1, 'reporte muestra gráfica con movimientos');
+    check(await page.locator('[data-action="export-csv"]').count() === 0, 'reportes no duplica exportación CSV');
+    await tab(page, 'movements');
     const [csv] = await Promise.all([page.waitForEvent('download'), page.locator('[data-action="export-csv"]').first().click()]);
     check(csv.suggestedFilename().endsWith('.csv'), 'exporta CSV');
     await tab(page, 'account');
@@ -182,6 +187,8 @@ async function main() {
     await page.getByRole('button', { name: 'Verificar código' }).click();
     await page.getByText('Cuentas confirmadas', { exact: true }).waitFor();
     check(fake.verified, 'verifica segundo factor en el flujo simulado y abre indicadores');
+    check(await page.getByRole('heading',{name:'Estado de los avisos'}).isVisible(), 'el dueño ve el estado del programador');
+    check(await page.getByText('El último chequeo tuvo fallos',{exact:true}).isVisible(), 'el dueño ve fallos de proveedor');
     check(await page.locator('#owner-secret').count() === 0, 'la clave ya no se muestra después de verificar');
     check(errors.length === 0, 'ningún error JavaScript en los flujos (' + errors.join(', ') + ')');
     console.log(passed + ' comprobaciones del flujo completadas.');

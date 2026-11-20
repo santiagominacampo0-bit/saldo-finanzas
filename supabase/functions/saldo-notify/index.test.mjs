@@ -6,6 +6,7 @@ import { beforeEach, test } from "node:test";
 const origin = "https://santiagominacampo0-bit.github.io";
 const session = "header.payload.signature";
 const userId = "10000000-0000-0000-0000-000000000001";
+const fakeRunId = "20000000-0000-0000-0000-000000000002";
 const fakeCronSecret = "f".repeat(64);
 const vaultPair = { public_key: "B" + "v".repeat(86), private_key: "p".repeat(43) };
 const generatedPair = { publicKey: "B" + "c".repeat(86), privateKey: "k".repeat(43) };
@@ -36,6 +37,15 @@ globalThis.testSupabase = {
   async rpc(name, params) {
     scenario.calls.push({ name, params });
     if (name === "saldo_get_cron_token") return { data: fakeCronSecret };
+    if (name === "saldo_start_notification_check") {
+      if (scenario.healthStartError) return { error: { message: "simulated metrics failure" } };
+      return { data: fakeRunId };
+    }
+    if (name === "saldo_finish_notification_check") {
+      assert.equal(params.p_run_id, fakeRunId);
+      scenario.healthCounts = { ...params.p_counts };
+      return { data: true };
+    }
     if (name === "saldo_get_or_initialize_vapid") {
       if (scenario.vaultError) return { error: { message: "simulated vault failure" } };
       if (params) scenario.vaultPair = vaultPair;
@@ -120,8 +130,11 @@ beforeEach(async () => {
     reminders: [],
     recurringReminders: [],
     recurringError: false,
+    healthStartError: false,
+    healthCounts: null,
     completed: [],
     providerStatus: 201,
+    providerPlan: [],
     vaultPair,
     vaultError: false,
     keyGenerations: 0,
@@ -135,7 +148,9 @@ beforeEach(async () => {
     assert.equal(options.redirect, "error");
     assert.ok(options.signal instanceof AbortSignal);
     scenario.fetches.push({ url: url.href, payload: JSON.parse(new TextDecoder().decode(options.body)) });
-    return new Response(null, { status: scenario.providerStatus });
+    const status = scenario.providerPlan.shift() ?? scenario.providerStatus;
+    if (status === "timeout") throw new DOMException("Mock provider timeout", "TimeoutError");
+    return new Response(null, { status });
   };
   await import(entry + "?case=" + ++caseNumber);
 });
@@ -296,9 +311,11 @@ test("restricts cron access and dispatches only claimed accounts", async () => {
   assert.deepEqual(await response.json(), { ok: true, sent: 1 });
   assert.deepEqual(scenario.calls, [
     { name: "saldo_get_cron_token", params: undefined },
+    { name: "saldo_start_notification_check", params: undefined },
     { name: "saldo_get_or_initialize_vapid", params: undefined },
     { name: "saldo_claim_due_push_reminders", params: { p_limit: 24 } },
     { name: "saldo_claim_due_recurring_reminders", params: { p_limit: 24 } },
+    { name: "saldo_finish_notification_check", params: { p_run_id: fakeRunId, p_counts: scenario.healthCounts } },
   ]);
   assert.deepEqual(scenario.completed[0].filters, {
     user_id: userId, reminder_month: "2026-11", reminder_type: "monthly", attempt_count: 1,
@@ -347,4 +364,44 @@ test("continues monthly delivery and reports failure when recurring claims are u
   assert.deepEqual(await response.json(), { error: "Una tarea de recordatorios no respondió.", sent: 1 });
   assert.equal(scenario.fetches[0].payload.tag, "saldo-monthly");
   assert.equal(scenario.completed[0].table, "push_reminder_dispatches");
+  assert.equal(scenario.healthCounts.processing_errors, 1);
+  assert.equal(scenario.healthCounts.accepted, 1);
+});
+
+test("records delivery and failure counts without copying individual subscription data", async () => {
+  scenario.reminders = [{ user_id: userId, reminder_month: "2026-11", attempt_count: 1 }];
+  scenario.recurringReminders = [{ user_id: userId, recurring_id: "private-rule-id", occurrence_date: "2026-11-20", attempt_count: 1 }];
+  scenario.rows = Array.from({ length: 5 }, (_, index) => subscription("https://web.push.apple.com/device-" + index));
+  scenario.providerPlan = [201, 503, "timeout", 403, 410, 201, 503, "timeout", 403, 410];
+
+  const response = await handler(request({ from: null, token: null, cron: fakeCronSecret }));
+  assert.deepEqual(await response.json(), { ok: true, sent: 2 });
+  assert.deepEqual(scenario.healthCounts, {
+    monthly_claims: 1, recurring_claims: 1, accepted: 2, transient_failures: 4, timed_out: 2,
+    provider_rejections: 2, discarded_subscriptions: 2, processing_errors: 0,
+  });
+});
+
+test("records a setup error without attempting either dispatcher", async () => {
+  scenario.vaultError = true;
+  const response = await handler(request({ from: null, token: null, cron: fakeCronSecret }));
+  assert.equal(response.status, 500);
+  assert.deepEqual(scenario.healthCounts, {
+    monthly_claims: 0, recurring_claims: 0, accepted: 0, transient_failures: 0, timed_out: 0,
+    provider_rejections: 0, discarded_subscriptions: 0, processing_errors: 1,
+  });
+  assert.deepEqual(scenario.fetches, []);
+});
+
+test("a health write failure does not skip a scheduled notification", async (t) => {
+  const log = t.mock.method(console, "error", () => {});
+  scenario.healthStartError = true;
+  scenario.reminders = [{ user_id: userId, reminder_month: "2026-11", attempt_count: 1 }];
+  scenario.rows = [subscription("https://web.push.apple.com/saldo-test")];
+
+  const response = await handler(request({ from: null, token: null, cron: fakeCronSecret }));
+  assert.deepEqual(await response.json(), { ok: true, sent: 1 });
+  assert.equal(scenario.healthCounts, null);
+  assert.equal(log.mock.callCount(), 1);
+  assert.deepEqual(log.mock.calls[0].arguments, ["No se pudo registrar el inicio del chequeo de avisos."]);
 });

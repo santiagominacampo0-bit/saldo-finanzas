@@ -1,10 +1,11 @@
-const CACHE_NAME = 'saldo-static-v5';
+const CACHE_NAME = 'saldo-static-v6';
 const BASE = self.registration.scope;
 const INDEX = new URL('./index.html', BASE).href;
 const FILES = new Set([
-  './', './index.html', './styles.css?v=5', './vendor/supabase.js?v=5',
-  './saldo-planning.js?v=5', './saldo-recurrence.js?v=5', './saldo-tools.js?v=5',
-  './supabase-config.js?v=5', './saldo-state.js?v=5', './app.js?v=5', './manifest.webmanifest',
+  './', './index.html', './styles.css?v=6', './vendor/supabase.js?v=6',
+  './saldo-calendar.js?v=6', './saldo-rules.js?v=6', './saldo-extras.js?v=6',
+  './saldo-planning.js?v=6', './saldo-recurrence.js?v=6', './saldo-tools.js?v=6',
+  './supabase-config.js?v=6', './saldo-state.js?v=6', './app.js?v=6', './manifest.webmanifest',
   './icons/saldo.svg', './icons/icon-192.png', './icons/icon-512.png',
   './icons/apple-touch-icon.png', './privacy.html',
 ].map(path => new URL(path, BASE).href));

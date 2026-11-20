@@ -49,6 +49,9 @@ let deletePanelOpen = false;
 let cloudSavedAt = '';
 let viewMonth = currentMonth();
 let transactionFilter = 'all';
+let walletFilter = 'all';
+let categoryFilter = 'all';
+let calendarRange = 7;
 let searchTerm = '';
 let modal = null;
 let installPrompt = null;
@@ -196,6 +199,9 @@ function handleSignedIn(user) {
   cloudReset = Boolean(stored?.reset);
   cloudSavedAt = typeof stored?.lastSave === 'string' ? stored.lastSave : '';
   plannerView = 'budgets';
+  walletFilter = categoryFilter = transactionFilter = 'all';
+  searchTerm = '';
+  calendarRange = 7;
   dataPanelOpen = deletePanelOpen = false;
   activeTab = 'home';
   modal = null;
@@ -219,6 +225,9 @@ function handleSignedOut() {
   cloudReset = false;
   cloudSavedAt = '';
   plannerView = 'budgets';
+  walletFilter = categoryFilter = transactionFilter = 'all';
+  searchTerm = '';
+  calendarRange = 7;
   dataPanelOpen = deletePanelOpen = false;
   guestMode = false;
   authBooting = false;
@@ -342,7 +351,7 @@ function categoryIcon(category) {
 }
 
 function navButton(item, mobile = false) {
-  const selected = activeTab === item.id || (activeTab === 'admin' && item.id === 'account');
+  const selected = activeTab === item.id || (activeTab === 'admin' && item.id === 'account') || (activeTab === 'rules' && item.id === 'movements');
   return `<button class="nav-button ${selected ? 'active' : ''}" data-tab="${item.id}" aria-label="${item.label}" ${selected ? 'aria-current="page"' : ''}><span class="nav-icon">${svg(item.icon)}</span><span>${item.label}</span></button>`;
 }
 
@@ -350,7 +359,7 @@ function shell() {
   const name = state.profile.name.trim();
   const initial = name ? escapeHTML(name[0].toUpperCase()) : 'S';
   const greeting = name ? `Hola, ${escapeHTML(name)}` : 'Hola, ¿cómo vas?';
-  const topTitle = activeTab === 'admin' ? 'Panel del dueño' : NAV.find(item => item.id === activeTab)?.label || 'Inicio';
+  const topTitle = activeTab === 'admin' ? 'Panel del dueño' : activeTab === 'rules' ? 'Reglas' : NAV.find(item => item.id === activeTab)?.label || 'Inicio';
   const profileCaption = authUser ? cloudStatusLabel() : 'Este dispositivo';
   const privacyTitle = authUser ? 'Cuenta protegida' : 'Tu información es privada';
   const privacyCopy = authUser ? 'Tus datos se guardan en este dispositivo y se sincronizan con tu cuenta.' : 'Los movimientos permanecen en este dispositivo hasta que inicies sesión.';
@@ -384,6 +393,7 @@ function shell() {
 
 function renderView() {
   if (activeTab === 'movements') return renderMovements();
+  if (activeTab === 'rules') return renderCategoryRules();
   if (activeTab === 'budgets') return renderPlanning();
   if (activeTab === 'reports') return renderReports();
   if (activeTab === 'account') return renderAccount();
@@ -412,6 +422,7 @@ function renderHome() {
       <article class="stat-card"><div class="stat-copy"><div class="stat-label">Gastos del mes</div><div class="stat-value">${formatMoney(expenses)}</div><div class="stat-meta">${incomes ? `${expensesPct}% de tus ingresos` : `${transactionsIn(viewMonth, 'expense').length} registros`}</div></div><span class="stat-icon expense">${svg('expense')}</span></article>
     </div>
   </section>
+  ${renderForecast()}
   <section class="section-grid">
     <article class="panel panel-pad">
       <div class="section-heading"><div><h2>Próximos vencimientos</h2><p>Pagos e ingresos que programaste.</p></div><button class="text-button" data-action="planner-view" data-view="recurring">Ver recurrentes</button></div>
@@ -435,9 +446,10 @@ function budgetRow(category, amount, used) {
 
 function transactionRow(tx, full = false) {
   const isIncome = tx.type === 'income';
+  const details = [tx.merchant, tx.walletId ? walletLabel(tx.walletId) : '', tx.note || (!full ? tx.category : '')].filter(Boolean).join(' · ');
   return `<div class="transaction-row">
     <span class="transaction-symbol ${isIncome ? 'income' : ''}">${svg(categoryIcon(tx.category))}</span>
-    <span class="transaction-copy"><span class="transaction-title">${escapeHTML(tx.title || tx.category)}</span><span class="transaction-meta">${escapeHTML(tx.note || tx.category)}</span></span>
+    <span class="transaction-copy"><span class="transaction-title">${escapeHTML(tx.title || tx.category)}</span><span class="transaction-meta">${escapeHTML(details)}</span></span>
     ${full ? `<span class="row-category">${escapeHTML(tx.category)}</span>` : ''}
     <span class="transaction-amount ${isIncome ? 'income' : ''}">${isIncome ? '+' : '−'}${formatMoney(tx.amount)}<span class="transaction-date">${escapeHTML(formatDate(tx.date))}</span></span>
     ${full ? `<button class="more-button" data-action="edit-transaction" data-id="${escapeHTML(tx.id)}" aria-label="Editar ${escapeHTML(tx.title)}">${svg('dots')}</button>` : ''}
@@ -449,14 +461,12 @@ function emptyTransactions(title, message, withButton = false) {
 }
 
 function renderMovements() {
-  const filtered = state.transactions.filter(tx => tx.date?.slice(0, 7) === viewMonth)
-    .filter(tx => transactionFilter === 'all' || tx.type === transactionFilter)
-    .filter(tx => `${tx.title} ${tx.category} ${tx.note || ''}`.toLowerCase().includes(searchTerm.toLowerCase()))
-    .sort((a, b) => b.date.localeCompare(a.date));
+  const filtered = visibleMovements();
   const total = filtered.reduce((sum, tx) => sum + (tx.type === 'income' ? 1 : -1) * Number(tx.amount), 0);
-  return `<div class="page-title-row"><div><h2>Todos tus movimientos</h2><p>Revisa y organiza lo que entra y sale de tu bolsillo.</p></div><button class="secondary-button" data-action="export-csv">${svg('download')} Exportar CSV</button></div>
+  return `<div class="page-title-row"><div><h2>Todos tus movimientos</h2><p>Revisa y organiza lo que entra y sale de tu bolsillo.</p></div><div class="movement-actions"><button class="secondary-button" data-action="category-rules">Reglas de categorías</button><button class="secondary-button" data-action="export-csv">${svg('download')} Exportar CSV</button></div></div>
     <div class="toolbar"><div class="filter-group">${[['all', 'Todos'], ['income', 'Ingresos'], ['expense', 'Gastos']].map(([id, label]) => `<button class="filter-chip ${transactionFilter === id ? 'active' : ''}" data-action="filter-transactions" data-filter="${id}">${label}</button>`).join('')}</div><label class="search-wrap">${svg('search')}<input id="movement-search" aria-label="Buscar movimiento" placeholder="Buscar movimiento" value="${escapeHTML(searchTerm)}" /></label></div>
-    <div class="panel"><div class="table-head"><span>Movimiento</span><span>Categoría</span><span>Valor</span><span></span></div><div class="movement-list">${filtered.length ? filtered.map(tx => transactionRow(tx, true)).join('') : emptyTransactions('No hay resultados', searchTerm ? 'Prueba con otra búsqueda o cambia el filtro.' : 'Registra tu primer movimiento para verlo aquí.', !searchTerm)}</div>${filtered.length ? `<div class="movement-total"><span>Balance de la lista</span><strong>${formatMoney(total)}</strong></div>` : ''}</div>`;
+    ${renderMovementFilters()}
+    <div class="panel"><div class="table-head"><span>Movimiento</span><span>Categoría</span><span>Valor</span><span></span></div><div class="movement-list">${filtered.length ? filtered.map(tx => transactionRow(tx, true)).join('') : emptyTransactions('No hay resultados', searchTerm || walletFilter !== 'all' || categoryFilter !== 'all' || transactionFilter !== 'all' ? 'Prueba con otra búsqueda o cambia los filtros.' : 'Registra tu primer movimiento para verlo aquí.', !searchTerm && walletFilter === 'all' && categoryFilter === 'all')}</div>${filtered.length ? `<div class="movement-total"><span>Balance de la lista</span><strong>${formatMoney(total)}</strong></div>` : ''}</div>`;
 }
 
 function renderBudgets() {
@@ -487,7 +497,7 @@ function renderReports() {
   const hasSixMonthData = months.some(month => state.transactions.some(tx => tx.date?.slice(0, 7) === month));
   const byCategory = spentByCategory();
   const categories = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
-  return `<div class="page-title-row"><div><h2>Panorama de tus finanzas</h2><p>Resumen de ${escapeHTML(monthName(viewMonth))} según los movimientos que registraste.</p></div><button class="secondary-button" data-action="export-csv">${svg('download')} Descargar CSV</button></div>
+  return `<div class="page-title-row"><div><h2>Panorama de tus finanzas</h2><p>Resumen de ${escapeHTML(monthName(viewMonth))} según los movimientos que registraste.</p></div></div>
     <div class="report-kpis"><article class="report-kpi"><span>Ingresos</span><strong class="positive">${formatMoney(income)}</strong></article><article class="report-kpi"><span>Gastos</span><strong>${formatMoney(expense)}</strong></article><article class="report-kpi"><span>Balance del mes</span><strong class="${net >= 0 ? 'positive' : 'negative'}">${formatMoney(net)}</strong></article></div>
     <div class="report-grid"><article class="panel panel-pad"><div class="section-heading"><div><h2>Ingresos y gastos</h2><p>Últimos seis meses registrados en COP</p></div></div>${hasSixMonthData ? `<div class="report-chart" role="img" aria-label="Comparación de ingresos y gastos mensuales">${months.map(month => {
       const inc = totalFor(month, 'income'); const exp = totalFor(month, 'expense');
@@ -686,7 +696,7 @@ function renderAdmin() {
       <article class="report-kpi"><span>Cuentas confirmadas</span><strong>${Number(adminSummary.accounts) || 0}</strong></article>
       <article class="report-kpi"><span>Cuentas con datos</span><strong>${Number(adminSummary.sync_accounts) || 0}</strong></article>
       <article class="report-kpi"><span>Dispositivos con push</span><strong>${Number(adminSummary.push_devices) || 0}</strong></article>
-    </div>`;
+    </div>${renderNotificationCheck(adminSummary.notification_check)}`;
   }
   return `<section class="panel panel-pad"><div class="section-heading"><div><h2>Panel del dueño</h2><p>Indicadores generales de Saldo</p></div></div>
     ${content}<div class="account-actions"><button class="text-button" data-action="admin-return">Volver a Cuenta</button></div></section>`;
@@ -704,7 +714,7 @@ function renderAccount() {
     : 'Recibe avisos aunque Saldo esté cerrada.';
   const statusLabel = cloudStatusLabel();
   const local = readState(STORE_KEY);
-  const hasLocalRecords = local.transactions.length || ['budgets','wallets','transfers','recurring','goals'].some(key => Object.keys(local[key]).length) || local.profile.name;
+  const hasLocalRecords = local.transactions.length || ['budgets','wallets','transfers','recurring','goals','categoryRules'].some(key => Object.keys(local[key]).length) || local.profile.name;
   const authPanel = authUser
     ? `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Abre esta cuenta en tus dispositivos para ver tus movimientos.</p><div class="cloud-account"><span class="avatar">${svg('user')}</span><span><strong>${escapeHTML(authUser.email || 'Cuenta Saldo')}</strong><small data-cloud-status>${statusLabel}</small><small data-cloud-saved-at>${escapeHTML(lastCloudSaveLabel())}</small></span></div><div class="account-actions"><button class="secondary-button" data-action="sync-now">Sincronizar ahora</button><button class="secondary-button" data-action="sign-out">Cerrar sesión</button>${adminStatus?.allowed ? '<button class="secondary-button" data-action="admin-open">Panel del dueño</button>' : ''}${hasLocalRecords ? '<button class="text-button" data-action="import-local">Importar datos de invitado</button>' : ''}</div></section>`
     : `<section class="form-section"><h3>Cuenta y sincronización</h3><p>Inicia sesión para guardar una copia en la nube y sincronizar tus dispositivos.</p><div class="account-actions"><button class="primary-button" data-action="auth-mode" data-mode="signin">Iniciar sesión</button><button class="secondary-button" data-action="auth-mode" data-mode="signup">Crear cuenta</button></div></section>`;
@@ -723,7 +733,7 @@ function renderAccount() {
       </section>
       <section class="form-section">
         <details class="account-details" id="data-panel" ${dataPanelOpen ? 'open' : ''}>
-          <summary>Datos y copias</summary><p>Descarga una copia de tus movimientos, bolsillos, metas y recurrentes.</p>
+          <summary>Datos y copias</summary><p>Descarga una copia de tus datos y reglas de categorías.</p>
           <div class="account-actions"><button class="secondary-button" data-action="export-json">${svg('download')} Descargar copia</button><button class="secondary-button" data-action="import-json">Restaurar copia</button><input hidden id="import-file" type="file" accept="application/json,.json" /></div>
           <details class="account-details account-delete" id="delete-panel" ${deletePanelOpen ? 'open' : ''}><summary>Borrar datos</summary><p>Vacía los datos de Saldo. Tu cuenta de acceso se conserva.</p><button class="danger-button" data-action="clear-data">Borrar todos mis datos</button></details>
         </details>
@@ -741,13 +751,36 @@ function renderModal() {
 
 function renderTransactionModal() {
   const existing = modal.id ? state.transactions.find(tx => tx.id === modal.id) : null;
+  const draft = modal.fields || existing || {};
   const type = modal.draftType || existing?.type || 'expense';
-  const categories = CATEGORIES[type];
-  const category = modal.category || existing?.category || categories[0];
-  const walletField = Object.keys(state.wallets).length ? toolSelect('tx-wallet', 'walletId', 'Bolsillo', walletOptions(modal.walletId || existing?.walletId)) : '';
-  return `<div class="modal-backdrop" data-action="backdrop-close"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-header"><div><h2 id="modal-title">${existing ? 'Editar movimiento' : 'Nuevo movimiento'}</h2><p>Registra una entrada o salida de dinero.</p></div><button class="icon-button" data-action="close-modal" aria-label="Cerrar">${svg('close')}</button></div><div class="modal-body">
-    <div class="type-switch"><button class="type-choice ${type === 'income' ? 'active income' : ''}" data-action="set-type" data-type="income">Ingreso</button><button class="type-choice ${type === 'expense' ? 'active expense' : ''}" data-action="set-type" data-type="expense">Gasto</button></div>
-    <form id="transaction-form" class="modal-form"><input type="hidden" name="type" value="${type}"/><div class="field field-amount"><label for="tx-amount">Valor en pesos</label><input id="tx-amount" name="amount" type="number" inputmode="decimal" min="1" step="1" required autofocus value="${escapeHTML(modal.fields?.amount ?? existing?.amount ?? '')}" placeholder="0" /></div><div class="field"><label for="tx-title">Concepto</label><input id="tx-title" name="title" maxlength="80" required value="${escapeHTML(modal.fields?.title ?? existing?.title ?? '')}" placeholder="Ej. Mercado, salario…" /></div><div class="form-grid"><div class="field"><label for="tx-category">Categoría</label><select id="tx-category" name="category">${categories.map(item => `<option ${item === category ? 'selected' : ''}>${escapeHTML(item)}</option>`).join('')}</select></div><div class="field"><label for="tx-date">Fecha</label><input id="tx-date" name="date" type="date" required value="${escapeHTML(modal.fields?.date || existing?.date || todayString())}" /></div></div><div class="field"><label for="tx-note">Nota <span class="field-help">(opcional)</span></label><input id="tx-note" name="note" maxlength="120" value="${escapeHTML(modal.fields?.note ?? existing?.note ?? '')}" placeholder="Añade un detalle" /></div>${walletField}<div class="modal-form-actions">${existing ? `<button class="danger-button" type="button" data-action="delete-transaction" data-id="${escapeHTML(existing.id)}">Eliminar</button>` : ''}<button class="secondary-button" type="button" data-action="close-modal">Cancelar</button><button class="primary-button" type="submit">${existing ? 'Guardar cambios' : 'Guardar movimiento'}</button></div></form>
+  const category = modal.category || existing?.category || CATEGORIES[type].at(-1);
+  const walletId = modal.walletId || existing?.walletId || preferredWallet();
+  const walletField = Object.keys(state.wallets).length
+    ? toolSelect('tx-wallet', 'walletId', 'Bolsillo', walletOptions(walletId))
+    : '';
+  const label = existing ? 'Editar movimiento' : modal.duplicate ? 'Duplicar movimiento' : 'Nuevo movimiento';
+  return `<div class="modal-backdrop" data-action="backdrop-close"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-header"><div><h2 id="modal-title">${label}</h2><p>${modal.duplicate ? 'Revisa los datos de la copia antes de guardarla.' : 'Registra una entrada o salida de dinero.'}</p></div>
+    <button class="icon-button" data-action="close-modal" aria-label="Cerrar">${svg('close')}</button></div>
+    <div class="modal-body">
+      <div class="type-switch"><button class="type-choice ${type === 'income' ? 'active income' : ''}" data-action="set-type" data-type="income">Ingreso</button><button class="type-choice ${type === 'expense' ? 'active expense' : ''}" data-action="set-type" data-type="expense">Gasto</button></div>
+      <form id="transaction-form" class="modal-form">
+        <input type="hidden" name="type" value="${type}" />
+        <div class="field field-amount"><label for="tx-amount">Valor en pesos</label><input id="tx-amount" name="amount" type="number" inputmode="numeric" min="1" max="999999999999" step="1" required value="${escapeHTML(draft.amount ?? '')}" placeholder="0" /></div>
+        <div class="field"><label for="tx-title">Concepto</label><input id="tx-title" name="title" maxlength="80" required value="${escapeHTML(draft.title || '')}" placeholder="Ej. Mercado, salario…" /></div>
+        <div class="field"><label for="tx-merchant">Comercio <span class="field-help">(opcional)</span></label><input id="tx-merchant" name="merchant" maxlength="80" value="${escapeHTML(draft.merchant || '')}" placeholder="Ej. Supermercado" /></div>
+        <div class="form-grid">
+          <div class="field"><label for="tx-category">Categoría</label><select id="tx-category" name="category" aria-describedby="tx-category-hint">${categoryOptions(type, category)}</select><small id="tx-category-hint" class="field-help" aria-live="polite"></small></div>
+          <div class="field"><label for="tx-date">Fecha</label><input id="tx-date" name="date" type="date" required value="${escapeHTML(draft.date || todayString())}" /></div>
+        </div>
+        ${walletField}
+        <div class="field"><label for="tx-note">Nota <span class="field-help">(opcional)</span></label><input id="tx-note" name="note" maxlength="120" value="${escapeHTML(draft.note || '')}" placeholder="Añade un detalle" /></div>
+        <div class="modal-form-actions">
+          ${existing ? `<button class="danger-button" type="button" data-action="delete-transaction" data-id="${escapeHTML(existing.id)}">Eliminar</button><button class="secondary-button" type="button" data-action="duplicate-transaction" data-id="${escapeHTML(existing.id)}">Duplicar</button>` : ''}
+          <button class="secondary-button" type="button" data-action="close-modal">Cancelar</button>
+          <button class="primary-button" type="submit">${existing ? 'Guardar cambios' : 'Guardar movimiento'}</button>
+        </div>
+      </form>
     </div></section></div>`;
 }
 
@@ -761,6 +794,7 @@ function render(options = {}) {
   const gated = authBooting || authMode === 'new-password' || (!authUser && !guestMode);
   root.innerHTML = gated ? renderAuth() : shell();
   lastView = gated ? '' : activeTab;
+  if (!gated && modal?.type === 'transaction') showCategorySuggestion(root.querySelector('#transaction-form'));
   if (!gated && installPrompt && localStorage.getItem('saldo-install-dismissed') !== '1') {
     document.getElementById('install-banner')?.classList.add('visible');
   }
@@ -783,8 +817,16 @@ function toast(message, type = 'success') {
   window.setTimeout(() => item.remove(), 3800);
 }
 
-function openTransaction(id = null) {
-  modal = { type: 'transaction', id, draftType: id ? null : 'expense', category: null };
+function openTransaction(id = null, duplicate = false) {
+  const existing = id ? state.transactions.find(tx => tx.id === id) : null;
+  if (id && !existing) return;
+  modal = {
+    type: 'transaction', id: duplicate ? null : id, duplicate,
+    draftType: existing?.type || 'expense', category: existing?.category,
+    manualCategory: Boolean(existing),
+    walletId: existing ? existing.walletId || 'general' : preferredWallet(),
+    fields: duplicate ? { ...existing, date: todayString() } : null,
+  };
   render();
   window.setTimeout(() => root.querySelector('#tx-amount')?.focus(), 40);
 }
@@ -797,11 +839,14 @@ function saveTransaction(form) {
   const id = modal.id || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const tx = { id, type, amount: Math.round(amount), title: String(data.get('title') || '').trim(), category: String(data.get('category') || ''), date: String(data.get('date') || todayString()), note: String(data.get('note') || '').trim() };
   if (!tx.title || !validDate(tx.date) || !CATEGORIES[type].includes(tx.category)) return toast('Revisa el concepto, la fecha y la categoría.', 'error');
+  const merchant = String(data.get('merchant') || '').trim();
+  if (merchant) tx.merchant = merchant;
   const walletId = String(data.get('walletId') || 'general');
   if (Object.hasOwn(state.wallets, walletId)) tx.walletId = walletId;
   const exists = state.transactions.some(item => item.id === id);
   state.transactions = exists ? state.transactions.map(item => item.id === id ? tx : item) : [...state.transactions, tx];
   const month = tx.date.slice(0, 7);
+  rememberWallet(tx.walletId || 'general');
   persist();
   modal = null;
   const alert = tx.type === 'expense' ? checkBudgetAlerts(month, tx.category) : '';
@@ -1070,8 +1115,11 @@ function downloadFile(name, content, mime) {
 }
 
 function exportCSV() {
-  const headers = ['Fecha', 'Tipo', 'Concepto', 'Categoría', 'Valor COP', 'Nota'];
-  const rows = transactionsIn(viewMonth).slice().sort((a, b) => a.date.localeCompare(b.date)).map(tx => [tx.date, tx.type === 'income' ? 'Ingreso' : 'Gasto', tx.title, tx.category, tx.amount, tx.note || '']);
+  const headers = ['Fecha', 'Tipo', 'Concepto', 'Comercio', 'Categoría', 'Bolsillo', 'Valor COP', 'Nota'];
+  const rows = visibleMovements().slice().reverse().map(tx => [
+    tx.date, tx.type === 'income' ? 'Ingreso' : 'Gasto', tx.title, tx.merchant || '',
+    tx.category, walletLabel(tx.walletId), tx.amount, tx.note || '',
+  ]);
   const cell = value => {
     const raw = String(value ?? '');
     const safe = typeof value !== 'number' && /^[\s]*[=+@-]/.test(raw) ? "'" + raw : raw;
@@ -1079,7 +1127,7 @@ function exportCSV() {
   };
   const csv = [headers, ...rows].map(row => row.map(cell).join(',')).join('\r\n');
   downloadFile(`saldo-movimientos-${viewMonth}.csv`, `\uFEFF${csv}`, 'text/csv;charset=utf-8');
-  toast(`Descargaste los movimientos de ${monthName(viewMonth)} en CSV.`);
+  toast(`Descargaste ${rows.length} ${rows.length === 1 ? 'movimiento' : 'movimientos'} en CSV.`);
 }
 
 function exportJSON() {
@@ -1113,13 +1161,22 @@ function handleAction(button) {
   if (handlePlanningAction(button)) return;
   const action = button.dataset.action;
   if (action === 'new-transaction') openTransaction();
+  if (action === 'category-rules') { activeTab = 'rules'; render(); window.scrollTo(0,0); }
+  if (action === 'calendar-range') { calendarRange = button.dataset.range === '30' ? 30 : 7; render(); }
+  if (action === 'duplicate-transaction') openTransaction(button.dataset.id, true);
+  if (action === 'reset-movement-filters') {
+    walletFilter = categoryFilter = transactionFilter = 'all';
+    searchTerm = '';
+    render();
+  }
   if (action === 'close-modal') { modal = null; render(); }
   if (action === 'set-type' && modal?.type === 'transaction') {
     modal.walletId = root.querySelector('#tx-wallet')?.value || 'general';
     const draft = new FormData(root.querySelector('#transaction-form'));
     modal.fields = Object.fromEntries(draft);
     modal.draftType = button.dataset.type;
-    modal.category = CATEGORIES[modal.draftType][0];
+    modal.category = null;
+    modal.manualCategory = false;
     render();
     root.querySelector('#tx-amount')?.focus();
   }
@@ -1260,6 +1317,8 @@ root.addEventListener('submit', event => {
 });
 
 root.addEventListener('input', event => {
+  if (modal?.type === 'transaction' && ['tx-title','tx-merchant'].includes(event.target.id)) showCategorySuggestion(event.target.form);
+
   if (event.target.id === 'movement-search') {
     searchTerm = event.target.value;
     const caret = event.target.selectionStart;
@@ -1275,7 +1334,14 @@ root.addEventListener('toggle', event => {
 root.addEventListener('change', event => {
   if (event.target.id === 'recurring-type') root.querySelector('#recurring-category').innerHTML = categoryOptions(event.target.value);
 
-  if (event.target.id === 'tx-category' && modal?.type === 'transaction') modal.category = event.target.value;
+  if (event.target.id === 'rule-type') root.querySelector('#rule-category').innerHTML = categoryOptions(event.target.value);
+  if (event.target.id === 'filter-wallet') { walletFilter = event.target.value; render({focus:'filter-wallet'}); }
+  if (event.target.id === 'filter-category') { categoryFilter = event.target.value; render({focus:'filter-category'}); }
+  if (event.target.id === 'tx-category' && modal?.type === 'transaction') {
+    modal.category = event.target.value;
+    modal.manualCategory = true;
+    showCategorySuggestion(event.target.form);
+  }
   if (event.target.id === 'reminder-day') { state.settings.reminderDay = event.target.value; persist(); }
   if (event.target.id === 'reminder-time' && event.target.value) { state.settings.reminderTime = event.target.value; persist(); }
   if (event.target.id === 'import-file') importJSON(event.target.files?.[0]);

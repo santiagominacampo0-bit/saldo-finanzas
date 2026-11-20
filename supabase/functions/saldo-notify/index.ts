@@ -28,6 +28,21 @@ type VapidDetails = { subject: string; publicKey: string; privateKey: string };
 type Admin = ReturnType<typeof makeAdmin>;
 let vapidConfiguration: Promise<VapidDetails> | undefined;
 
+function emptyNotificationCounts() {
+  return {
+    monthly_claims: 0,
+    recurring_claims: 0,
+    accepted: 0,
+    transient_failures: 0,
+    timed_out: 0,
+    provider_rejections: 0,
+    discarded_subscriptions: 0,
+    processing_errors: 0,
+  };
+}
+
+type NotificationCounts = ReturnType<typeof emptyNotificationCounts>;
+
 function makeAdmin() {
   const url = Deno.env.get("SUPABASE_URL");
   const secretKeys = Deno.env.get("SUPABASE_SECRET_KEYS");
@@ -138,7 +153,7 @@ function validSubscription(row: PushRow) {
 
 async function deliverToDevice(row: PushRow, kind: Kind, vapidDetails: VapidDetails) {
   const endpoint = trustedEndpoint(row.endpoint);
-  if (!endpoint || !validSubscription(row)) return "invalid";
+  if (!endpoint || !validSubscription(row)) return "discarded";
 
   let details;
   try {
@@ -151,9 +166,10 @@ async function deliverToDevice(row: PushRow, kind: Kind, vapidDetails: VapidDeta
       vapidDetails,
     });
   } catch {
-    return "invalid";
+    return "processing_error";
   }
 
+  const signal = AbortSignal.timeout(pushTimeoutMs);
   try {
     const headers = new Headers();
     for (const [name, value] of Object.entries(details.headers)) {
@@ -164,12 +180,15 @@ async function deliverToDevice(row: PushRow, kind: Kind, vapidDetails: VapidDeta
       headers,
       body: new Uint8Array(details.body),
       redirect: "error",
-      signal: AbortSignal.timeout(pushTimeoutMs),
+      signal,
     });
-    await response.body?.cancel();
+    await response.body?.cancel().catch(() => {});
     if (response.ok) return "sent";
-    return response.status === 404 || response.status === 410 ? "invalid" : "transient";
-  } catch {
+    if (response.status === 404 || response.status === 410) return "discarded";
+    if ([408, 425, 429].includes(response.status) || response.status >= 500) return "transient";
+    return "rejected";
+  } catch (error) {
+    if (signal.aborted || (error instanceof DOMException && error.name === "TimeoutError")) return "timeout";
     return "transient";
   }
 }
@@ -182,75 +201,112 @@ async function deliverToUser(admin: Admin, userId: string, kind: Kind, vapid: Va
 
   const rows = (data || []) as PushRow[];
   const outcomes = await Promise.all(rows.map((row) => deliverToDevice(row, kind, vapid)));
-  const invalid = rows.filter((_, index) => outcomes[index] === "invalid").map((row) => row.endpoint);
+  const invalid = rows.filter((_, index) => outcomes[index] === "discarded").map((row) => row.endpoint);
+  let cleanupErrors = 0;
   if (invalid.length) {
-    const { error: deleteError } = await admin.from("push_subscriptions")
-      .delete().eq("user_id", userId).in("endpoint", invalid);
-    if (deleteError) console.error("No se pudieron retirar suscripciones vencidas.");
+    try {
+      const { error: deleteError } = await admin.from("push_subscriptions")
+        .delete().eq("user_id", userId).in("endpoint", invalid);
+      if (deleteError) throw new Error();
+    } catch {
+      cleanupErrors++;
+      console.error("No se pudieron retirar suscripciones vencidas.");
+    }
   }
 
+  const timedOut = outcomes.filter((outcome) => outcome === "timeout").length;
+  const transientFailures = timedOut + outcomes.filter((outcome) => outcome === "transient").length;
+  const providerRejections = outcomes.filter((outcome) => outcome === "rejected").length;
+  const processingFailures = outcomes.filter((outcome) => outcome === "processing_error").length;
   return {
     sent: outcomes.filter((outcome) => outcome === "sent").length,
-    transientFailures: outcomes.filter((outcome) => outcome === "transient").length,
+    deliveryFailures: transientFailures + providerRejections + processingFailures,
+    transientFailures,
+    timedOut,
+    providerRejections,
+    discardedSubscriptions: invalid.length,
+    processingErrors: processingFailures + cleanupErrors,
     subscriptions: rows.length,
   };
 }
 
-async function deliverReminder(admin: Admin, reminder: Reminder, vapid: VapidDetails) {
+function collectDeliveryCounts(counts: NotificationCounts, result: Awaited<ReturnType<typeof deliverToUser>>) {
+  counts.accepted += result.sent;
+  counts.transient_failures += result.transientFailures;
+  counts.timed_out += result.timedOut;
+  counts.provider_rejections += result.providerRejections;
+  counts.discarded_subscriptions += result.discardedSubscriptions;
+  counts.processing_errors += result.processingErrors;
+}
+
+async function deliverReminder(admin: Admin, reminder: Reminder, vapid: VapidDetails, counts: NotificationCounts) {
   const result = await deliverToUser(admin, reminder.user_id, "monthly", vapid);
+  collectDeliveryCounts(counts, result);
   // If no device accepted the alert, the four-minute lease lets a later cron run retry.
   // After a partial delivery, avoid sending a duplicate to devices that accepted it.
-  if (result.sent || !result.transientFailures) {
+  if (result.sent || !result.deliveryFailures) {
     const { error } = await admin.from("push_reminder_dispatches")
       .update({ completed_at: new Date().toISOString() })
       .eq("user_id", reminder.user_id).eq("reminder_month", reminder.reminder_month)
       .eq("reminder_type", "monthly").eq("attempt_count", reminder.attempt_count);
-    if (error) console.error("No se pudo marcar un recordatorio como completado.");
+    if (error) {
+      counts.processing_errors++;
+      console.error("No se pudo marcar un recordatorio como completado.");
+    }
   }
-  return result.sent;
 }
 
-async function deliverReminderBatches<T>(groups: T[], deliver: (group: T) => Promise<number>) {
-  let sent = 0;
+async function deliverReminderBatches<T>(groups: T[], deliver: (group: T) => Promise<void>, counts: NotificationCounts) {
   for (let start = 0; start < groups.length; start += reminderConcurrency) {
     const batch = groups.slice(start, start + reminderConcurrency);
     const results = await Promise.allSettled(batch.map(deliver));
     for (const result of results) {
-      if (result.status === "fulfilled") sent += result.value;
-      else console.error("No se pudo entregar un recordatorio.");
+      if (result.status === "rejected") {
+        counts.processing_errors++;
+        console.error("No se pudo entregar un recordatorio.");
+      }
     }
   }
-  return sent;
 }
 
-async function dispatchMonthlyReminders(admin: Admin, vapid: VapidDetails) {
+async function dispatchMonthlyReminders(admin: Admin, vapid: VapidDetails, counts: NotificationCounts) {
   const { data, error } = await admin.rpc("saldo_claim_due_push_reminders", { p_limit: reminderBatchSize });
   if (error) throw new Error("No se pudieron reservar recordatorios mensuales.");
-  return deliverReminderBatches((data || []) as Reminder[], (reminder) => deliverReminder(admin, reminder, vapid));
+  const claims = (data || []) as Reminder[];
+  counts.monthly_claims += claims.length;
+  await deliverReminderBatches(claims, (reminder) => deliverReminder(admin, reminder, vapid, counts), counts);
 }
 
-async function deliverRecurringReminders(admin: Admin, claims: RecurringReminder[], vapid: VapidDetails) {
+async function deliverRecurringReminders(admin: Admin, claims: RecurringReminder[], vapid: VapidDetails, counts: NotificationCounts) {
   const userId = claims[0].user_id;
   const result = await deliverToUser(admin, userId, "recurring", vapid);
-  if (result.sent || !result.transientFailures) {
+  collectDeliveryCounts(counts, result);
+  if (result.sent || !result.deliveryFailures) {
     const completedAt = new Date().toISOString();
-    await Promise.all(claims.map(async (claim) => {
+    const updates = await Promise.allSettled(claims.map(async (claim) => {
       const { error } = await admin.from("push_recurring_dispatches")
         .update({ completed_at: completedAt })
         .eq("user_id", userId).eq("recurring_id", claim.recurring_id)
         .eq("occurrence_date", claim.occurrence_date).eq("attempt_count", claim.attempt_count);
-      if (error) console.error("No se pudo marcar un aviso de próximos movimientos como completado.");
+      if (error) throw new Error("No se pudo marcar un aviso como completado.");
     }));
+    for (const update of updates) {
+      if (update.status === "rejected") {
+        counts.processing_errors++;
+        console.error("No se pudo marcar un aviso de próximos movimientos como completado.");
+      }
+    }
   }
-  return result.sent;
 }
 
-async function dispatchRecurringReminders(admin: Admin, vapid: VapidDetails) {
+async function dispatchRecurringReminders(admin: Admin, vapid: VapidDetails, counts: NotificationCounts) {
   const { data, error } = await admin.rpc("saldo_claim_due_recurring_reminders", { p_limit: reminderBatchSize });
   if (error) throw new Error("No se pudieron reservar avisos de próximos movimientos.");
 
+  const claimed = (data || []) as RecurringReminder[];
+  counts.recurring_claims += claimed.length;
   const byUser = new Map<string, RecurringReminder[]>();
-  for (const claim of (data || []) as RecurringReminder[]) {
+  for (const claim of claimed) {
     let claims = byUser.get(claim.user_id);
     if (!claims) {
       claims = [];
@@ -258,7 +314,43 @@ async function dispatchRecurringReminders(admin: Admin, vapid: VapidDetails) {
     }
     claims.push(claim);
   }
-  return deliverReminderBatches([...byUser.values()], (claims) => deliverRecurringReminders(admin, claims, vapid));
+  await deliverReminderBatches([...byUser.values()], (claims) => deliverRecurringReminders(admin, claims, vapid, counts), counts);
+}
+
+async function runNotificationCheck(admin: Admin, origin: string | null) {
+  let runId: string | null = null;
+  try {
+    const { data, error } = await admin.rpc("saldo_start_notification_check");
+    if (error || typeof data !== "string") throw new Error();
+    runId = data;
+  } catch {
+    console.error("No se pudo registrar el inicio del chequeo de avisos.");
+  }
+
+  const counts = emptyNotificationCounts();
+  try {
+    const vapid = await getVapidDetails(admin);
+    const results = await Promise.allSettled([
+      dispatchMonthlyReminders(admin, vapid, counts),
+      dispatchRecurringReminders(admin, vapid, counts),
+    ]);
+    const failedDispatchers = results.filter((result) => result.status === "rejected").length;
+    counts.processing_errors += failedDispatchers;
+    if (failedDispatchers) return reply({ error: "Una tarea de recordatorios no respondió.", sent: counts.accepted }, 503, origin);
+    return reply({ ok: true, sent: counts.accepted }, 200, origin);
+  } catch {
+    counts.processing_errors++;
+    return reply({ error: "No se pudo procesar el aviso." }, 500, origin);
+  } finally {
+    if (runId) {
+      try {
+        const { error } = await admin.rpc("saldo_finish_notification_check", { p_run_id: runId, p_counts: counts });
+        if (error) throw new Error();
+      } catch {
+        console.error("No se pudo registrar el resultado del chequeo de avisos.");
+      }
+    }
+  }
 }
 
 Deno.serve(async (request) => {
@@ -277,16 +369,7 @@ Deno.serve(async (request) => {
       if (typeof expected !== "string" || !matchesCronSecret(cronToken, expected)) {
         return reply({ error: "Credencial inválida." }, 401, origin);
       }
-      const vapid = await getVapidDetails(admin);
-      const results = await Promise.allSettled([
-        dispatchMonthlyReminders(admin, vapid),
-        dispatchRecurringReminders(admin, vapid),
-      ]);
-      const sent = results.reduce((count, result) => count + (result.status === "fulfilled" ? result.value : 0), 0);
-      if (results.some((result) => result.status === "rejected")) {
-        return reply({ error: "Una tarea de recordatorios no respondió.", sent }, 503, origin);
-      }
-      return reply({ ok: true, sent }, 200, origin);
+      return await runNotificationCheck(admin, origin);
     }
 
     const token = request.headers.get("Authorization")?.match(/^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/i)?.[1];
@@ -309,10 +392,10 @@ Deno.serve(async (request) => {
     if (!quota) return reply({ error: "Espera unos minutos antes de enviar más avisos." }, 429, origin, { "Retry-After": "300" });
 
     const result = await deliverToUser(admin, user.id, kind, await getVapidDetails(admin));
-    if (!result.sent && result.transientFailures) {
+    if (!result.sent && result.deliveryFailures) {
       return reply({ error: "No se pudieron entregar los avisos ahora." }, 502, origin);
     }
-    return reply({ ok: true, ...result }, 200, origin);
+    return reply({ ok: true, sent: result.sent, transientFailures: result.deliveryFailures, subscriptions: result.subscriptions }, 200, origin);
   } catch {
     return reply({ error: "No se pudo procesar el aviso." }, 500, origin);
   }

@@ -7,6 +7,7 @@
   const commonJS = typeof module === 'object' && module.exports;
   const planning = commonJS ? require('./saldo-planning.js') : root.SaldoPlanning;
   const recurrence = commonJS ? require('./saldo-recurrence.js') : root.SaldoRecurrence;
+  const categoryRules = commonJS ? require('./saldo-rules.js') : root.SaldoRules;
   const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const plainText = (value, limit) => typeof value === 'string' ? value.trim().slice(0, limit) : '';
   const validMonth = value => /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
@@ -30,10 +31,12 @@
       const type = tx.type === 'expense' || tx.type === 'income' ? tx.type : '';
       if (!id || !title || !type || !positiveAmount(tx.amount) || !validDate(tx.date)) continue;
       const allowed = categories[type];
+      const merchant = plainText(tx.merchant, 80);
       transactions.set(id, {
         id, type, title, date: tx.date, amount: tx.amount,
         category: allowed.includes(tx.category) ? tx.category : allowed.at(-1),
         note: plainText(tx.note, 120),
+        ...(merchant ? { merchant } : {}),
         ...(Object.hasOwn(wallets, tx.walletId) ? { walletId: tx.walletId } : {}),
       });
     }
@@ -64,6 +67,7 @@
       transfers: planning.normalizeTransfers(data.transfers, wallets),
       recurring,
       goals: planning.normalizeGoals(data.goals),
+      categoryRules: categoryRules.normalizeRules(data.categoryRules, categories),
       settings: {
         notificationsEnabled: settings.notificationsEnabled === true,
         remindersEnabled: settings.remindersEnabled === true,
@@ -106,6 +110,7 @@
       transfers: mergeCollection(base.transfers, local.transfers, remote.transfers),
       recurring: mergeCollection(base.recurring, local.recurring, remote.recurring),
       goals: mergeCollection(base.goals, local.goals, remote.goals),
+      categoryRules: mergeCollection(base.categoryRules, local.categoryRules, remote.categoryRules),
       settings: Object.fromEntries(mergeMap(map(base.settings), map(local.settings), map(remote.settings))),
       alertedBudgets: Object.fromEntries(mergeMap(map(base.alertedBudgets), map(local.alertedBudgets), map(remote.alertedBudgets))),
       lastReminder: local.lastReminder === base.lastReminder ? remote.lastReminder : local.lastReminder,

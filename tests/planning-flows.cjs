@@ -26,7 +26,7 @@ async function examine(browser, viewport) {
     test(await page.getByText('Balance del mes', {exact:true}).isVisible(), 'balance del mes destacado');
     test(await page.getByText('Próximos vencimientos', {exact:true}).isVisible(), 'inicio anticipa vencimientos');
     await nav('budgets');
-    test(await page.locator('.planner-nav button').count() === 4, 'cuatro secciones de planificación');
+    test(await page.locator('.planner-nav button').count() === 5, 'cinco secciones de planificación');
     test(await fits(), 'pestañas completas en el ancho');
     test(!await page.locator('.content [data-action="export-csv"]').count(), 'presupuesto no duplica exportación');
     await plan('wallets');
