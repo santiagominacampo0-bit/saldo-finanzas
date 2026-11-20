@@ -828,7 +828,7 @@ function openTransaction(id = null, duplicate = false) {
     fields: duplicate ? { ...existing, date: todayString() } : null,
   };
   render();
-  window.setTimeout(() => root.querySelector('#tx-amount')?.focus(), 40);
+  root.querySelector('#tx-amount')?.focus({ preventScroll: true });
 }
 
 function saveTransaction(form) {
