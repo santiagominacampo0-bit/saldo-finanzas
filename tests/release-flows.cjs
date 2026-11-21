@@ -40,9 +40,24 @@ const amount = dayOfMonth * 1000;
     await page.locator('#movement-search').fill('1990-01-01');
     check(await page.getByText('No hay resultados',{exact:true}).isVisible(),'búsqueda sin fecha coincidente');
     await page.waitForFunction(()=>!!navigator.serviceWorker.controller);
-    check((await page.evaluate(()=>caches.keys())).includes('saldo-static-v7'),'caché v7 activa');
+    check((await page.evaluate(()=>caches.keys())).includes('saldo-static-v7.1'),'caché v7.1 activa');
     await context.setOffline(true);
     await page.reload();
+    const installedIcons = await page.evaluate(async () => {
+      const url = document.querySelector('link[rel="manifest"]').href;
+      const manifest = await (await fetch(url)).json();
+      const apple = document.querySelector('link[rel="apple-touch-icon"]');
+      const icons = manifest.icons.map(icon => ({ ...icon, url: new URL(icon.src, url).href }));
+      icons.push({ url: apple.href, sizes: apple.sizes.value, purpose: 'apple' });
+      for (const icon of icons) {
+        const img = new Image();
+        img.src = icon.url;
+        await img.decode();
+        if (icon.sizes !== 'any' && icon.sizes !== img.naturalWidth + 'x' + img.naturalHeight) return false;
+      }
+      return manifest.id === './' && manifest.start_url === './' && icons.some(icon => icon.purpose === 'maskable');
+    });
+    check(installedIcons, 'iconos de instalación disponibles sin conexión con el tamaño y la identidad esperados');
     await page.locator('[data-action="guest"]').click();
     check(await page.getByText('3 registros hoy',{exact:true}).isVisible(),'libro disponible sin conexión');
     await page.evaluate(()=>{

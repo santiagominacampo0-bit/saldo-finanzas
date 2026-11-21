@@ -1,4 +1,4 @@
-const CACHE_NAME = 'saldo-static-v7';
+const CACHE_NAME = 'saldo-static-v7.1';
 const BASE = self.registration.scope;
 const INDEX = new URL('./index.html', BASE).href;
 const FILES = new Set([
@@ -6,8 +6,9 @@ const FILES = new Set([
   './saldo-theme.js?v=7', './saldo-calendar.js?v=7', './saldo-rules.js?v=7', './saldo-extras.js?v=7',
   './saldo-planning.js?v=7', './saldo-recurrence.js?v=7', './saldo-tools.js?v=7',
   './supabase-config.js?v=7', './saldo-state.js?v=7', './app.js?v=7', './manifest.webmanifest',
-  './icons/saldo.svg?v=7', './icons/icon-maskable-512.png?v=7', './icons/notification-badge.png?v=7', './icons/icon-192.png?v=7', './icons/icon-512.png?v=7',
-  './icons/apple-touch-icon.png?v=7', './privacy.html',
+  './icons/saldo.svg?v=7', './icons/notification-badge.png?v=7', './icons/icon-192.png?v=7',
+  './icons/launcher.svg', './icons/launcher-192.png', './icons/launcher-512.png',
+  './icons/launcher-maskable-512.png', './icons/launcher-apple-180.png', './privacy.html',
 ].map(path => new URL(path, BASE).href));
 
 self.addEventListener('install', event => {

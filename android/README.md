@@ -16,4 +16,4 @@ export SALDO_SIGNING_PASSWORD_FILE=/ruta/privada/saldo-android-pass.txt
 bash android/build-apk.sh /ruta/Saldo-Android.apk
 ```
 
-Si el JDK no está en `PATH`, define `SALDO_JDK_DIR` con la ruta de su carpeta. El script empaqueta el icono del sitio, firma el APK y comprueba la firma. La app requiere Android 8 o superior y un navegador con el que abrir el sitio.
+Si el JDK no está en `PATH`, define `SALDO_JDK_DIR` con la ruta de su carpeta. El script empaqueta las capas del icono exterior desde `icons/`, firma el APK y comprueba la firma. Android adapta la silueta al lanzador. Desde Android 13, los lanzadores compatibles también pueden aplicar al icono los colores del teléfono. La app requiere Android 8 o superior y un navegador con el que abrir el sitio.

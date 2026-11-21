@@ -4,6 +4,7 @@
     <string name="browser_needed">Instala o activa un navegador para abrir Saldo.</string>
     <string name="retry">Abrir Saldo</string>
     <color name="saldo_background">#F3F7F3</color>
+    <color name="saldo_launcher_background">#0C453F</color>
     <color name="saldo_primary">#164534</color>
     <style name="Theme.Saldo" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:colorAccent">@color/saldo_primary</item>

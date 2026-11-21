@@ -3,6 +3,7 @@ set -euo pipefail
 
 android_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source_dir="$android_dir/src/main"
+icon_dir="$android_dir/../icons"
 
 : "${SALDO_ANDROID_JAR:?Configura SALDO_ANDROID_JAR con android.jar de API 36}"
 : "${SALDO_ANDROID_BUILD_TOOLS:?Configura SALDO_ANDROID_BUILD_TOOLS con build-tools 36.0.0}"
@@ -21,9 +22,11 @@ fi
 output_path="$(realpath -m -- "$1")"
 scratch_dir="$(mktemp -d -t saldo-android.XXXXXXXX)"
 trap 'rm -r -- "$scratch_dir"' EXIT
-mkdir -p "$scratch_dir/res/mipmap-xxxhdpi" "$scratch_dir/gen" "$scratch_dir/classes" "$scratch_dir/dex"
+mkdir -p "$scratch_dir/res/mipmap-xxxhdpi" "$scratch_dir/res/drawable-xxxhdpi" "$scratch_dir/gen" "$scratch_dir/classes" "$scratch_dir/dex"
 cp -R -- "$source_dir/res/." "$scratch_dir/res/"
-cp -- "$android_dir/../icons/icon-512.png" "$scratch_dir/res/mipmap-xxxhdpi/ic_saldo.png"
+cp -- "$icon_dir/launcher-192.png" "$scratch_dir/res/mipmap-xxxhdpi/ic_saldo.png"
+cp -- "$icon_dir/launcher-foreground.png" "$scratch_dir/res/drawable-xxxhdpi/saldo_launcher_foreground.png"
+cp -- "$icon_dir/launcher-monochrome.png" "$scratch_dir/res/drawable-xxxhdpi/saldo_launcher_monochrome.png"
 
 "$SALDO_ANDROID_BUILD_TOOLS/aapt2" compile --dir "$scratch_dir/res" -o "$scratch_dir/resources.zip"
 "$SALDO_ANDROID_BUILD_TOOLS/aapt2" link \
